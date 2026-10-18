@@ -37,6 +37,8 @@ struct NvimState {
     cursor_col_char: usize,
     mode: String,
     blocking: bool,
+    cmdline: String,
+    cmdpos: usize,
     last_yank: Option<YankEvent>,
 }
 
@@ -146,8 +148,21 @@ impl NvimSession {
                 cursor_col_char: self.last_cursor_col_char,
                 mode,
                 blocking: true,
+                cmdline: String::new(),
+                cmdpos: 0,
                 last_yank: None,
             });
+        }
+
+        let mut cmdline = String::new();
+        let mut cmdpos = 0usize;
+        if mode == "c" {
+            if let Ok(val) = self.call("nvim_call_function", vec![Value::from("getcmdline"), Value::Array(vec![])]) {
+                cmdline = val.as_str().unwrap_or("").to_string();
+            }
+            if let Ok(val) = self.call("nvim_call_function", vec![Value::from("getcmdpos"), Value::Array(vec![])]) {
+                cmdpos = val.as_u64().unwrap_or(1) as usize;
+            }
         }
 
         let lines_val = self.call(
@@ -261,6 +276,8 @@ impl NvimSession {
             cursor_col_char,
             mode,
             blocking: false,
+            cmdline,
+            cmdpos,
             last_yank,
         })
     }

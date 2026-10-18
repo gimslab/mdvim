@@ -39,6 +39,8 @@
     cursor_col_char: number;
     mode: string;
     blocking: boolean;
+    cmdline?: string;
+    cmdpos?: number;
     last_yank?: YankEvent | null;
   }
 
@@ -496,14 +498,32 @@
       parts.push(e.key);
     } else if (e.code.startsWith('Key')) {
       parts.push(e.code.slice(3).toUpperCase());
+    } else if (e.key.length === 1 && /[a-zA-Z]/.test(e.key)) {
+      parts.push(e.key.toUpperCase());
     } else if (e.key === 'Tab') {
       parts.push('Tab');
     }
-    return parts.join('+');
+    // Only return combo if at least one modifier is active or it is a function key
+    if (parts.length > 1 || (parts.length === 1 && (parts[0].startsWith('F') || parts[0] === 'Tab'))) {
+      return parts.join('+');
+    }
+    return '';
   }
 
   function handleKeyDown(e: KeyboardEvent) {
     if (showCommandPalette) {
+      return;
+    }
+
+    // Direct check for Ctrl+Shift+P / F1 before anything else
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'P' || e.key === 'p' || e.code === 'KeyP')) {
+      e.preventDefault();
+      showCommandPalette = true;
+      return;
+    }
+    if (e.key === 'F1') {
+      e.preventDefault();
+      showCommandPalette = true;
       return;
     }
 
@@ -520,6 +540,27 @@
         commandRegistry.execute(target, commandContext).catch((err) => {
           console.error(`Failed to execute shortcut command ${target}:`, err);
         });
+        return;
+      }
+    }
+
+    // If in command-line mode (e.g. user typed ':') and presses Enter, check command
+    if (nvimState.mode === 'c' && (e.key === 'Enter' || e.code === 'Enter')) {
+      const cmd = (nvimState.cmdline || '').trim();
+      if (cmd === 'w' || cmd.startsWith('w ')) {
+        e.preventDefault();
+        sendNvimKeys('<CR>');
+        saveFile().catch((err) => console.error('Save failed:', err));
+        return;
+      } else if (cmd === 'q') {
+        e.preventDefault();
+        sendNvimKeys('<CR>');
+        closeActiveTab().catch((err) => console.error('Close tab failed:', err));
+        return;
+      } else if (cmd === 'wq') {
+        e.preventDefault();
+        sendNvimKeys('<CR>');
+        saveFile().then(() => closeActiveTab()).catch((err) => console.error('Save & close failed:', err));
         return;
       }
     }
@@ -843,17 +884,25 @@
           ? 'mode-i'
           : nvimState.mode.startsWith('v') || nvimState.mode.startsWith('V')
             ? 'mode-v'
-            : 'mode-n'}"
+            : nvimState.mode === 'c'
+              ? 'mode-c'
+              : 'mode-n'}"
       >
         {nvimState.mode.startsWith('i')
           ? msg.insertMode
           : nvimState.mode.startsWith('v') || nvimState.mode.startsWith('V')
             ? msg.visualMode
-            : msg.normalMode}
+            : nvimState.mode === 'c'
+              ? msg.commandMode
+              : msg.normalMode}
       </span>
-      <span class="cursor-pos">
-        {msg.lineCol(nvimState.cursor_row + 1, nvimState.cursor_col_char + 1)}
-      </span>
+      {#if nvimState.mode === 'c'}
+        <span class="cmdline-display">:{nvimState.cmdline || ''}</span>
+      {:else}
+        <span class="cursor-pos">
+          {msg.lineCol(nvimState.cursor_row + 1, nvimState.cursor_col_char + 1)}
+        </span>
+      {/if}
       {#if nvimState.blocking}
         <span class="waiting-badge">[{msg.waitingKey}]</span>
       {/if}
@@ -1122,6 +1171,17 @@
   }
   .mode-v {
     background: #9333ea;
+  }
+  .mode-c {
+    background: #059669;
+  }
+  .cmdline-display {
+    font-weight: 700;
+    color: #0f172a;
+    background: #e2e8f0;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: 'JetBrains Mono', 'D2Coding', monospace;
   }
   .waiting-badge {
     color: #b91c1c;
