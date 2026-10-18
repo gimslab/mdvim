@@ -367,19 +367,199 @@ async fn nvim_set_buffer(
     s.get_state()
 }
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::oneshot;
+
+static NEXT_REQ_ID: AtomicU64 = AtomicU64::new(1);
+
+struct PendingRequests(Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>);
+struct LastReportedState(Mutex<serde_json::Value>);
+
+#[tauri::command]
+async fn ctl_report_state(
+    state_json: serde_json::Value,
+    reported: tauri::State<'_, Arc<LastReportedState>>,
+) -> Result<(), String> {
+    let mut st = reported.0.lock().map_err(|e| e.to_string())?;
+    *st = state_json;
+    Ok(())
+}
+
+#[tauri::command]
+async fn ctl_response(
+    req_id: u64,
+    result: serde_json::Value,
+    pending: tauri::State<'_, Arc<PendingRequests>>,
+) -> Result<(), String> {
+    let mut map = pending.0.lock().map_err(|e| e.to_string())?;
+    if let Some(tx) = map.remove(&req_id) {
+        let _ = tx.send(result);
+    }
+    Ok(())
+}
+
+fn get_ipc_socket_path() -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        let uid = unsafe { libc::getuid() };
+        std::path::PathBuf::from(format!("/tmp/mdvim-{}.sock", uid))
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join("mdvim.sock")
+    }
+}
+
+fn start_ipc_server(
+    app_handle: tauri::AppHandle,
+    reported_state: Arc<LastReportedState>,
+    pending_requests: Arc<PendingRequests>,
+) {
+    let socket_path = get_ipc_socket_path();
+    if socket_path.exists() {
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime for IPC");
+
+        rt.block_on(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+            #[cfg(unix)]
+            use tokio::net::UnixListener;
+
+            #[cfg(unix)]
+            let listener = match UnixListener::bind(&socket_path) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("Failed to bind IPC socket {:?}: {e}", socket_path);
+                    return;
+                }
+            };
+
+            #[cfg(unix)]
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        eprintln!("IPC accept error: {e}");
+                        continue;
+                    }
+                };
+
+                let app = app_handle.clone();
+                let rep = reported_state.clone();
+                let pend = pending_requests.clone();
+
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut lines = TokioBufReader::new(reader).lines();
+
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+
+                        let req: serde_json::Value = match serde_json::from_str(trimmed) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                let err_resp = serde_json::json!({
+                                    "status": "error",
+                                    "message": format!("Invalid JSON: {e}")
+                                });
+                                let _ = writer.write_all(format!("{err_resp}\n").as_bytes()).await;
+                                continue;
+                            }
+                        };
+
+                        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                        let req_id = NEXT_REQ_ID.fetch_add(1, Ordering::SeqCst);
+
+                        let response = match method {
+                            "get-state" => {
+                                let st = rep.0.lock().map(|g| g.clone()).unwrap_or(serde_json::Value::Null);
+                                serde_json::json!({ "status": "ok", "state": st })
+                            }
+                            "exec" | "list-commands" | "insert-text" | "send-keys" => {
+                                use tauri::Emitter;
+                                let (tx, rx) = oneshot::channel();
+                                {
+                                    if let Ok(mut map) = pend.0.lock() {
+                                        map.insert(req_id, tx);
+                                    }
+                                }
+                                let payload = serde_json::json!({
+                                    "id": req_id,
+                                    "method": method,
+                                    "params": req.get("params").cloned().unwrap_or(serde_json::Value::Null)
+                                });
+                                if let Err(e) = app.emit("ctl-request", payload) {
+                                    if let Ok(mut map) = pend.0.lock() {
+                                        map.remove(&req_id);
+                                    }
+                                    serde_json::json!({ "status": "error", "message": format!("Failed to dispatch to frontend: {e}") })
+                                } else {
+                                    match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+                                        Ok(Ok(res)) => res,
+                                        Ok(Err(_)) => serde_json::json!({ "status": "error", "message": "Channel closed before response" }),
+                                        Err(_) => {
+                                            if let Ok(mut map) = pend.0.lock() {
+                                                map.remove(&req_id);
+                                            }
+                                            serde_json::json!({ "status": "error", "message": "Request timed out after 5s" })
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                serde_json::json!({
+                                    "status": "error",
+                                    "message": format!("Unknown IPC method: {method}")
+                                })
+                            }
+                        };
+
+                        let _ = writer.write_all(format!("{response}\n").as_bytes()).await;
+                    }
+                });
+            }
+        });
+    });
+}
+
 fn main() {
     let initial = vec![String::new()];
     let session = NvimSession::new(initial).expect("Failed to start embedded Neovim");
 
+    let reported_state = Arc::new(LastReportedState(Mutex::new(serde_json::Value::Null)));
+    let pending_requests = Arc::new(PendingRequests(Mutex::new(HashMap::new())));
+
+    let rep_for_setup = reported_state.clone();
+    let pend_for_setup = pending_requests.clone();
+
     tauri::Builder::default()
         .manage(AppState(Mutex::new(session)))
+        .manage(reported_state.clone())
+        .manage(pending_requests.clone())
         .invoke_handler(tauri::generate_handler![
             nvim_get_state,
             nvim_input,
             nvim_paste_text,
             nvim_set_register,
-            nvim_set_buffer
+            nvim_set_buffer,
+            ctl_report_state,
+            ctl_response
         ])
+        .setup(move |app| {
+            start_ipc_server(app.handle().clone(), rep_for_setup, pend_for_setup);
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running mdvim");
 }

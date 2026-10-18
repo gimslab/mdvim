@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { defaultConfig, resolveShortcut } from './lib/config';
   import { t } from './lib/i18n';
   import {
@@ -546,6 +547,79 @@
 
   onMount(async () => {
     await loadTabIntoNvim(tabs[0], 0, 0);
+
+    // Listen for external IPC control requests (mdvim ctl)
+    const unlisten = await listen<{ id: number; method: string; params: any }>('ctl-request', async (event) => {
+      const { id, method, params } = event.payload;
+      try {
+        if (method === 'list-commands') {
+          const list = commandRegistry.list().map((c) => ({
+            id: c.id,
+            titleKo: c.titleKo,
+            titleEn: c.titleEn,
+            category: c.category,
+            defaultShortcut: c.defaultShortcut,
+          }));
+          await invoke('ctl_response', { reqId: id, result: { status: 'ok', commands: list } });
+        } else if (method === 'exec') {
+          const cmdId = typeof params === 'string' ? params : params?.id;
+          const args = typeof params === 'object' ? params?.args : undefined;
+          const res = await commandRegistry.execute(cmdId, commandContext, args);
+          await invoke('ctl_response', { reqId: id, result: { status: 'ok', result: res ?? null } });
+        } else if (method === 'send-keys') {
+          const keys = typeof params === 'string' ? params : params?.keys || '';
+          await sendNvimKeys(keys);
+          await invoke('ctl_response', { reqId: id, result: { status: 'ok' } });
+        } else if (method === 'insert-text') {
+          const text = typeof params === 'string' ? params : params?.text || '';
+          await sendNvimPaste(text);
+          await invoke('ctl_response', { reqId: id, result: { status: 'ok' } });
+        } else {
+          await invoke('ctl_response', {
+            reqId: id,
+            result: { status: 'error', message: `Unknown method: ${method}` },
+          });
+        }
+      } catch (err: any) {
+        await invoke('ctl_response', {
+          reqId: id,
+          result: { status: 'error', message: err?.message || String(err) },
+        });
+      }
+    });
+
+    return () => {
+      unlisten();
+    };
+  });
+
+  // Continuously report current state to backend IPC cache
+  $effect(() => {
+    const st = {
+      activeTab: {
+        id: activeTab.id,
+        title: activeTab.title,
+        path: activeTab.path,
+        viewMode: activeTab.viewMode,
+        rawMarkdown: rawMarkdownPreview,
+        dirty: activeTab.dirty,
+      },
+      tabs: tabs.map((t) => ({
+        id: t.id,
+        title: t.title,
+        path: t.path,
+        viewMode: t.viewMode,
+        dirty: t.dirty,
+      })),
+      activeTabIndex,
+      cursor: {
+        row: nvimState.cursor_row,
+        col: nvimState.cursor_col_char,
+      },
+      mode: nvimState.mode,
+      blocking: nvimState.blocking,
+    };
+    invoke('ctl_report_state', { stateJson: st }).catch(() => {});
   });
 </script>
 

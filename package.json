@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "mdvim-ctl": "./bin/mdvim-ctl.js"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
