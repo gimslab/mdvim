@@ -13,6 +13,9 @@
     type ProjectedLine,
     type StyledChar,
   } from './lib/projection';
+  import { createDefaultRegistry } from './lib/commands/defaults';
+  import type { CommandDefinition, CommandContext } from './lib/commands';
+  import CommandPalette from './components/CommandPalette.svelte';
 
   interface NvimState {
     lines: string[];
@@ -41,6 +44,7 @@
   let config = $state({ ...defaultConfig });
   let msg = $derived(t(config.locale));
   let showInspector = $state(true);
+  let showCommandPalette = $state(false);
 
   let tabs = $state<TabDoc[]>([
     {
@@ -205,7 +209,7 @@
     await loadTabIntoNvim(tab, nvimState.cursor_row, nvimState.cursor_col_char);
   }
 
-  function toggleBoldUnderCursor() {
+  function toggleSpanStyleUnderCursor(styleKey: 'b' | 'i' | 'code') {
     const tab = tabs[activeTabIndex];
     if (tab.viewMode !== 'rendered') return;
     const row = tab.mdModel[nvimState.cursor_row];
@@ -214,10 +218,24 @@
     let end = s;
     while (s > 0 && row.chars[s - 1].c !== ' ') s--;
     while (end < row.chars.length && row.chars[end].c !== ' ') end++;
-    const targetBold = !row.chars[nvimState.cursor_col_char].b;
-    for (let k = s; k < end; k++) row.chars[k].b = targetBold;
+    const targetState = !row.chars[nvimState.cursor_col_char][styleKey];
+    for (let k = s; k < end; k++) {
+      row.chars[k][styleKey] = targetState;
+    }
     row.dirty = true;
     tab.mdModel = [...tab.mdModel];
+  }
+
+  function toggleBoldUnderCursor() {
+    toggleSpanStyleUnderCursor('b');
+  }
+
+  function toggleItalicUnderCursor() {
+    toggleSpanStyleUnderCursor('i');
+  }
+
+  function toggleCodeUnderCursor() {
+    toggleSpanStyleUnderCursor('code');
   }
 
   function toggleCheckboxOnLine(rowIdx: number) {
@@ -249,9 +267,76 @@
   }
 
   async function selectTab(idx: number) {
-    if (idx === activeTabIndex) return;
+    if (idx < 0 || idx >= tabs.length || idx === activeTabIndex) return;
     activeTabIndex = idx;
     await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
+  }
+
+  async function nextTab() {
+    if (tabs.length <= 1) return;
+    const nextIdx = (activeTabIndex + 1) % tabs.length;
+    await selectTab(nextIdx);
+  }
+
+  async function prevTab() {
+    if (tabs.length <= 1) return;
+    const prevIdx = (activeTabIndex - 1 + tabs.length) % tabs.length;
+    await selectTab(prevIdx);
+  }
+
+  async function closeActiveTab() {
+    if (tabs.length <= 1) {
+      // Don't close the last tab, reset it instead
+      tabs[0].title = 'untitled.md';
+      tabs[0].path = null;
+      tabs[0].mdModel = parseMarkdown('# mdvim 에디터\n\n');
+      tabs[0].dirty = false;
+      await loadTabIntoNvim(tabs[0], 0, 0);
+      return;
+    }
+    tabs.splice(activeTabIndex, 1);
+    activeTabIndex = Math.min(activeTabIndex, tabs.length - 1);
+    await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
+  }
+
+  const commandRegistry = createDefaultRegistry({
+    toggleViewMode: () => switchViewMode(activeTab.viewMode === 'rendered' ? 'code' : 'rendered'),
+    switchViewMode: (m) => switchViewMode(m),
+    toggleBold: () => toggleBoldUnderCursor(),
+    toggleItalic: () => toggleItalicUnderCursor(),
+    toggleCode: () => toggleCodeUnderCursor(),
+    newTab: () => addNewTab(),
+    nextTab: () => nextTab(),
+    prevTab: () => prevTab(),
+    closeActiveTab: () => closeActiveTab(),
+    toggleInspector: () => { showInspector = !showInspector; },
+  });
+
+  let commandContext = $derived<CommandContext>({
+    activeTab: {
+      id: activeTab.id,
+      title: activeTab.title,
+      viewMode: activeTab.viewMode,
+      rawMarkdown: rawMarkdownPreview,
+      dirty: activeTab.dirty,
+    },
+    cursor: {
+      row: nvimState.cursor_row,
+      col: nvimState.cursor_col_char,
+    },
+    mode: nvimState.mode,
+    tabsCount: tabs.length,
+    activeTabIndex,
+  });
+
+  async function handleExecuteCommand(cmd: CommandDefinition) {
+    showCommandPalette = false;
+    setTimeout(() => imeInputEl?.focus(), 50);
+    try {
+      await commandRegistry.execute(cmd.id, commandContext);
+    } catch (err) {
+      console.error('Failed to execute command:', err);
+    }
   }
 
   let pendingEnterAfterComposition = false;
@@ -281,6 +366,22 @@
   }
 
   function handleKeyDown(e: KeyboardEvent) {
+    if (showCommandPalette) {
+      return;
+    }
+
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'P' || e.key === 'p' || e.code === 'KeyP')) {
+      e.preventDefault();
+      showCommandPalette = true;
+      return;
+    }
+
+    if (e.key === 'F1') {
+      e.preventDefault();
+      showCommandPalette = true;
+      return;
+    }
+
     if ((e.ctrlKey || e.metaKey) && e.code.startsWith('Key')) {
       const letter = e.code[3].toUpperCase();
       const combo = `Ctrl+${letter}`;
@@ -455,6 +556,13 @@
       >
         {config.locale.toUpperCase()}
       </button>
+      <button
+        class="palette-btn"
+        onclick={() => (showCommandPalette = true)}
+        title="커맨드 팔레트 (Ctrl+Shift+P / F1)"
+      >
+        ⌨ 커맨드 (Ctrl+Shift+P)
+      </button>
     </div>
   </header>
 
@@ -532,6 +640,19 @@
       <span>{activeTab.viewMode === 'rendered' ? msg.renderedView : msg.codeView}</span>
     </div>
   </footer>
+
+  {#if showCommandPalette}
+    <CommandPalette
+      commands={commandRegistry.list()}
+      context={commandContext}
+      locale={config.locale}
+      onClose={() => {
+        showCommandPalette = false;
+        setTimeout(() => imeInputEl?.focus(), 50);
+      }}
+      onExecute={handleExecuteCommand}
+    />
+  {/if}
 </div>
 
 <style>
@@ -579,6 +700,16 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+  .palette-btn {
+    background: #f1f5f9;
+    border-color: #cbd5e1;
+    font-weight: 600;
+    color: #334155;
+  }
+  .palette-btn:hover {
+    background: #e2e8f0;
+    color: #0f172a;
   }
   .workspace {
     flex: 1;

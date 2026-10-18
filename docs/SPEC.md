@@ -122,19 +122,20 @@ flowchart LR
 3. **Normal 모드 한/영 상태**:
    - 표준 Vim 동작과 동일하게 Normal 모드에서 IME가 한글 상태이면 영문 모션(`hjkl` 등)으로 강제 변환하지 않습니다.
 
-### 5.3 단축키 라우팅 규칙
-- 어떤 단축키를 Neovim으로 보낼지, 앱 자체 기능(서식 토글 등)으로 처리할지 **설정 파일(`config.toml`)에서 사용자가 커스터마이징 가능**해야 합니다.
+### 5.3 커맨드 기반 단축키 라우팅 규칙
+- 모든 액션은 고유 커맨드 ID로 정의되며, 어떤 단축키를 어느 모드(`normal`, `insert`, `visual`, `always`)에서 어떤 커맨드(또는 Neovim 자체 키)로 실행할지 **설정 파일(`config.toml`)에서 사용자가 자유롭게 커스터마이징 가능**해야 합니다.
 - **기본값**:
-  - **Normal 모드**: `Ctrl+B`(페이지 위), `Ctrl+F`(페이지 아래), `Ctrl+R`(Redo), `Ctrl+V`(Visual Block) 등 모든 키를 Neovim에 우선 전달합니다.
-  - **Insert 모드**: `Ctrl+B`(굵게), `Ctrl+I`(기울임), `Ctrl+K`(링크 편집) 등을 편집용 서식 단축키로 동작시킵니다.
+  - **`always` (전역)**: `Ctrl+Shift+P` (커맨드 팔레트 열기), `Ctrl+E` (뷰 모드 토글), `Ctrl+S` (파일 저장).
+  - **`normal` 모드**: `Ctrl+B`(페이지 위), `Ctrl+F`(페이지 아래), `Ctrl+R`(Redo), `Ctrl+V`(Visual Block) 등 표준 Vim 키를 Neovim에 우선 전달합니다.
+  - **`insert` 모드**: `Ctrl+B`(`format.toggleBold`), `Ctrl+I`(`format.toggleItalic`), `Ctrl+K`(`format.editLink`) 등을 서식 커맨드로 동작시킵니다.
 
 ---
 
 ## 6. 파일 관리, 저장 및 UI 구성 (MVP 범위)
 
 ### 6.1 UI 레이아웃
-- **상단 바**: 열려 있는 여러 파일을 전환하는 **탭 바(Tab Bar)** + 뷰 모드 토글 스위치(렌더링 뷰 / 코드 뷰).
-- **중앙 패인**: 단일 패인 에디터 영역 (분할 화면 없음).
+- **상단 바**: 열려 있는 여러 파일을 전환하는 **탭 바(Tab Bar)** + 뷰 모드 토글 스위치(렌더링 뷰 / 코드 뷰) + 커맨드 팔레트 트리거.
+- **중앙 패인**: 단일 패인 에디터 영역 (분할 화면 없음) + 오버레이 모달 형태의 **커맨드 팔레트(Command Palette)**.
 - **하단 바**:
   - **상태바(Statusline)**: 현재 Vim 모드(`NORMAL`, `INSERT`, `VISUAL`, 키 입력 대기 등), 커서 위치(행/열), 파일명 및 저장 상태, 뷰 모드 표시.
   - **Vim 명령줄**: `:`(Ex 명령) 및 `/`, `?`(검색) 입력 시 하단 바에 표시.
@@ -149,3 +150,29 @@ flowchart LR
   - **탭과 `:q` 규칙**: 열린 탭이 여러 개일 때 `:q`는 현재 탭만 닫고, 마지막 남은 탭에서 `:q`를 실행하거나 `:qa`를 실행하면 앱을 종료합니다.
 - **외부 파일 변경 감지 (File Watcher)**:
   - 외부 프로그램이 파일을 변경했을 때 현재 버퍼가 수정 중(dirty)이 아니면 자동으로 다시 불러오고, 수정 중이면 충돌 알림을 띄워 사용자가 선택하게 합니다.
+
+---
+
+## 7. 확장성: 커맨드 아키텍처, 커맨드 팔레트 & 외부 AI 개발 툴 제어
+
+### 7.1 단일 커맨드 레지스트리 (Unified Command Registry)
+- 앱의 모든 액션은 고유 ID(예: `view.toggleMode`, `view.setMode`, `format.toggleBold`, `format.toggleItalic`, `format.toggleCode`, `format.toggleCheckbox`, `tab.new`, `tab.switch`, `tab.close`, `file.open`, `file.save`, `editor.getDocument`, `editor.setDocument`, `editor.insertMarkdown`, `nvim.sendKeys`, `nvim.execCommand` 등)와 JSON 인자/반환 스키마를 가진 **Command**로 정의됩니다.
+- UI 버튼, 단축키, 커맨드 팔레트, Neovim Ex 명령(`:Commands` 등), 외부 AI 개발 툴은 모두 동일한 Command Registry를 통해 액션을 수행합니다.
+
+### 7.2 커맨드 팔레트 (Command Palette) 및 단축키 매핑
+- **커맨드 팔레트**:
+  - 기본 단축키 `Ctrl+Shift+P`(macOS `Cmd+Shift+P`) 또는 Vim Normal 모드 단축키 / `:Commands`로 호출합니다.
+  - 한국어/영어 제목 및 커맨드 ID에 대한 실시간 검색(Fuzzy/Substring)을 지원하며, 각 커맨드에 설정된 현재 단축키 배지를 함께 표시합니다.
+- **자유로운 사용자 단축키 설정 (`config.toml`)**:
+  - 사용자는 모든 등록된 커맨드에 대해 원하는 키 조합과 활성 모드 조건(`when = "normal" | "insert" | "visual" | "always"`)을 자유롭게 지정할 수 있습니다.
+
+### 7.3 외부 AI 개발 툴 제어 인터페이스 (CLI + Local IPC) 및 `SKILL.md`
+1. **Local IPC 서버 + CLI 브리지 (`mdvim ctl`)**:
+   - 실행 중인 `mdvim` 인스턴스는 로컬 IPC 소켓(Linux/macOS: Unix Domain Socket, Windows: Named Pipe / Local TCP)을 열어 외부 제어 요청(JSON-RPC)을 수신합니다.
+   - CLI 서브커맨드(예: `mdvim ctl list-commands`, `mdvim ctl get-state`, `mdvim ctl exec <command-id> ['{"arg":...}']`)를 통해 Claude Code, Gemini CLI, Antigravity 등 모든 외부 AI 에이전트가 쉘 명령 한 줄로 mdvim을 제어할 수 있습니다.
+2. **전체 제어 권한 (Full State & Action Access)**:
+   - **상태 조회**: 열린 탭 목록, 활성 탭의 원본 마크다운(`rawMarkdown`), 화면 투영 텍스트(`projectedLines`), 커서 위치(행/열), 현재 Vim 모드(`mode`), 수정 상태(`dirty`) 전체 조회.
+   - **액션 실행**: 등록된 모든 커맨드 실행, 마크다운/텍스트 삽입 및 교체, Neovim 키 시퀀스(`nvim.sendKeys`) 및 Ex 명령(`nvim.execCommand`) 직접 실행.
+3. **`SKILL.md` (`skills.md`) 동반 개발**:
+   - 외부 AI 도구가 mdvim의 제어 프로토콜과 사용 가능한 모든 커맨드 목록, 예제 명령어를 즉시 학습·활용할 수 있도록 루트(또는 `SKILL.md`)를 **일급 소스코드**로 취급하여 새 커맨드나 기능이 추가될 때마다 항상 함께 업데이트합니다.
+
