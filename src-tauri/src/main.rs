@@ -284,8 +284,15 @@ async fn nvim_input(keys: String, state: tauri::State<'_, AppState>) -> Result<N
 #[tauri::command]
 async fn nvim_paste_text(text: String, state: tauri::State<'_, AppState>) -> Result<NvimState, String> {
     let mut s = state.0.lock().map_err(|e| e.to_string())?;
-    let escaped = text.replace('<', "<lt>");
-    s.call("nvim_input", vec![Value::from(escaped.as_str())])?;
+    // nvim_paste handles multi-line text cleanly across all modes without mangling newlines
+    let _ = s.call(
+        "nvim_paste",
+        vec![
+            Value::from(text.as_str()),
+            Value::from(true),  // crlf: false (literal)
+            Value::from(-1i64), // phase: -1 (all at once)
+        ],
+    )?;
     s.get_state()
 }
 

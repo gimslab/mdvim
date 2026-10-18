@@ -143,11 +143,16 @@ async function main() {
         break;
       }
       case 'insert-text': {
-        const text = args.slice(1).join(' ');
-        if (!text) {
+        const raw = args.slice(1).join(' ');
+        if (!raw) {
           console.error('Error: text required. Usage: mdvim ctl insert-text <text>');
           process.exit(1);
         }
+        // Unescape literal \n, \r, \t if passed in single quotes from shell
+        const text = raw
+          .replace(/\\r\\n/g, '\n')
+          .replace(/\\n/g, '\n')
+          .replace(/\\t/g, '\t');
         const res = await sendIpcRequest('insert-text', { text });
         console.log(JSON.stringify(res, null, 2));
         break;
