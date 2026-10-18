@@ -1,0 +1,33 @@
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f4f4f5;
+  --bg-active-line: #f8fafc;
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --border-color: #e4e4e7;
+  --accent-color: #2563eb;
+  --accent-hover: #1d4ed8;
+  --bold-color: #b45309;
+  --bold-bg: #fef3c7;
+  --cursor-block-bg: #2563eb;
+  --cursor-block-fg: #ffffff;
+  --cursor-bar-color: #ea580c;
+  --preedit-bg: #ffedd5;
+  --preedit-fg: #9a3412;
+  --preedit-border: #ea580c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Pretendard', 'Noto Sans KR', system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+}
