@@ -106,6 +106,60 @@ export function serializeMarkdown(model: ProjectedLine[]): string {
   return model.map(serializeLine).join('\n');
 }
 
+/**
+ * Extracts raw/rendered markdown for a given yanked range.
+ * If regtype is 'V' (linewise), returns whole lines including markdown prefixes and inline formatting.
+ * If regtype is 'v' (characterwise), extracts inline markdown formatted segment.
+ */
+export function extractMarkdownRange(
+  model: ProjectedLine[],
+  startRow: number,
+  startColChar: number,
+  endRow: number,
+  endColChar: number,
+  regtype: string
+): string[] {
+  if (model.length === 0) return [];
+  const sRow = Math.max(0, Math.min(startRow, model.length - 1));
+  const eRow = Math.max(sRow, Math.min(endRow, model.length - 1));
+
+  if (regtype === 'V') {
+    const lines: string[] = [];
+    for (let r = sRow; r <= eRow; r++) {
+      lines.push(serializeLine(model[r]));
+    }
+    return lines;
+  }
+
+  // Characterwise yank
+  if (sRow === eRow) {
+    const line = model[sRow];
+    const chars = line.chars.slice(startColChar, endColChar + 1);
+    const subLine: ProjectedLine = {
+      prefix: '',
+      chars,
+      raw: '',
+      dirty: true,
+    };
+    return [serializeLine(subLine)];
+  }
+
+  const lines: string[] = [];
+  for (let r = sRow; r <= eRow; r++) {
+    const line = model[r];
+    if (r === sRow) {
+      const chars = line.chars.slice(startColChar);
+      lines.push(serializeLine({ prefix: '', chars, raw: '', dirty: true }));
+    } else if (r === eRow) {
+      const chars = line.chars.slice(0, endColChar + 1);
+      lines.push(serializeLine({ prefix: line.prefix, chars, raw: '', dirty: true }));
+    } else {
+      lines.push(serializeLine(line));
+    }
+  }
+  return lines;
+}
+
 function locate(model: ProjectedLine[], idx: number): [number, number] {
   let rest = idx;
   for (let li = 0; li < model.length; li++) {

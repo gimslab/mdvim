@@ -7,6 +7,7 @@
     parseMarkdown,
     projectLines,
     serializeMarkdown,
+    extractMarkdownRange,
     applyProjected,
     reparseCompletedLines,
     isHorizontalRulePrefix,
@@ -17,6 +18,17 @@
   import type { CommandDefinition, CommandContext } from './lib/commands';
   import CommandPalette from './components/CommandPalette.svelte';
 
+  interface YankEvent {
+    regname: string;
+    regtype: string;
+    regcontents: string[];
+    start_row: number;
+    start_col: number;
+    end_row: number;
+    end_col: number;
+    operator: string;
+  }
+
   interface NvimState {
     lines: string[];
     cursor_row: number;
@@ -24,6 +36,7 @@
     cursor_col_char: number;
     mode: string;
     blocking: boolean;
+    last_yank?: YankEvent | null;
   }
 
   interface TabDoc {
@@ -179,6 +192,26 @@
         }
       }
       tab.mdModel = updatedModel;
+
+      // If a yank operation occurred in rendered mode, overwrite register with source markdown
+      if (state.last_yank) {
+        const y = state.last_yank;
+        const mdLines = extractMarkdownRange(
+          tab.mdModel,
+          y.start_row,
+          y.start_col > 0 ? y.start_col - 1 : 0,
+          y.end_row,
+          y.end_col > 0 ? y.end_col - 1 : 0,
+          y.regtype
+        );
+        if (mdLines.length > 0) {
+          await invoke('nvim_set_register', {
+            regname: y.regname,
+            lines: mdLines,
+            regtype: y.regtype,
+          });
+        }
+      }
     } else {
       tab.mdModel = parseMarkdown(state.lines.join('\n'));
     }

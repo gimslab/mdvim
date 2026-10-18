@@ -17,6 +17,18 @@ struct NvimSession {
     last_cursor_col_char: usize,
 }
 
+#[derive(Serialize, Clone, Debug)]
+struct YankEvent {
+    regname: String,
+    regtype: String, // "v", "V", "\x16"
+    regcontents: Vec<String>,
+    start_row: usize, // 0-based
+    start_col: usize, // 1-based (from col("'["))
+    end_row: usize,   // 0-based
+    end_col: usize,   // 1-based (from col("']"))
+    operator: String,
+}
+
 #[derive(Serialize, Clone)]
 struct NvimState {
     lines: Vec<String>,
@@ -25,6 +37,7 @@ struct NvimState {
     cursor_col_char: usize,
     mode: String,
     blocking: bool,
+    last_yank: Option<YankEvent>,
 }
 
 impl NvimSession {
@@ -55,6 +68,12 @@ impl NvimSession {
             "nvim_command",
             vec![Value::from(
                 "set noswapfile hidden encoding=utf-8 shortmess+=IsF cmdheight=5",
+            )],
+        )?;
+        session.call(
+            "nvim_command",
+            vec![Value::from(
+                "autocmd TextYankPost * let g:mdvim_last_yank = deepcopy(v:event) | let g:mdvim_last_yank_pos = [line(\"'[\"), col(\"'[\"), line(\"']\"), col(\"']\")]",
             )],
         )?;
         session.set_lines(&initial_lines)?;
@@ -127,6 +146,7 @@ impl NvimSession {
                 cursor_col_char: self.last_cursor_col_char,
                 mode,
                 blocking: true,
+                last_yank: None,
             });
         }
 
@@ -168,6 +188,72 @@ impl NvimSession {
         self.last_cursor_col_byte = cursor_col_byte;
         self.last_cursor_col_char = cursor_col_char;
 
+        // Check if TextYankPost recorded any yank event
+        let yank_val = self.call(
+            "nvim_eval",
+            vec![Value::from(
+                "exists('g:mdvim_last_yank') ? [g:mdvim_last_yank, g:mdvim_last_yank_pos] : []",
+            )],
+        )?;
+
+        let mut last_yank: Option<YankEvent> = None;
+        if let Value::Array(arr) = yank_val {
+            if arr.len() >= 2 {
+                let mut regname = String::new();
+                let mut regtype = "V".to_string();
+                let mut regcontents = Vec::new();
+                let mut operator = "y".to_string();
+
+                if let Value::Map(map) = &arr[0] {
+                    for (k, v) in map {
+                        if k.as_str() == Some("regname") {
+                            regname = v.as_str().unwrap_or("").to_string();
+                        } else if k.as_str() == Some("regtype") {
+                            regtype = v.as_str().unwrap_or("V").to_string();
+                        } else if k.as_str() == Some("operator") {
+                            operator = v.as_str().unwrap_or("y").to_string();
+                        } else if k.as_str() == Some("regcontents") {
+                            if let Value::Array(c_arr) = v {
+                                for line in c_arr {
+                                    regcontents.push(line.as_str().unwrap_or("").to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let mut start_row = 1usize;
+                let mut start_col = 1usize;
+                let mut end_row = 1usize;
+                let mut end_col = 1usize;
+                if let Value::Array(pos_arr) = &arr[1] {
+                    if pos_arr.len() >= 4 {
+                        start_row = pos_arr[0].as_u64().unwrap_or(1) as usize;
+                        start_col = pos_arr[1].as_u64().unwrap_or(1) as usize;
+                        end_row = pos_arr[2].as_u64().unwrap_or(1) as usize;
+                        end_col = pos_arr[3].as_u64().unwrap_or(1) as usize;
+                    }
+                }
+
+                // Clear the global variables in Neovim so we don't process it repeatedly
+                let _ = self.call(
+                    "nvim_command",
+                    vec![Value::from("unlet! g:mdvim_last_yank g:mdvim_last_yank_pos")],
+                );
+
+                last_yank = Some(YankEvent {
+                    regname,
+                    regtype,
+                    regcontents,
+                    start_row: start_row.saturating_sub(1),
+                    start_col,
+                    end_row: end_row.saturating_sub(1),
+                    end_col,
+                    operator,
+                });
+            }
+        }
+
         Ok(NvimState {
             lines,
             cursor_row,
@@ -175,6 +261,7 @@ impl NvimSession {
             cursor_col_char,
             mode,
             blocking: false,
+            last_yank,
         })
     }
 }
@@ -200,6 +287,58 @@ async fn nvim_paste_text(text: String, state: tauri::State<'_, AppState>) -> Res
     let escaped = text.replace('<', "<lt>");
     s.call("nvim_input", vec![Value::from(escaped.as_str())])?;
     s.get_state()
+}
+
+#[tauri::command]
+async fn nvim_set_register(
+    regname: String,
+    lines: Vec<String>,
+    regtype: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut s = state.0.lock().map_err(|e| e.to_string())?;
+    let r_name = if regname.is_empty() { "\"" } else { &regname };
+    let val_lines: Vec<Value> = lines.iter().map(|l| Value::from(l.as_str())).collect();
+    // Set both the target register and the unnamed register
+    let _ = s.call(
+        "nvim_call_function",
+        vec![
+            Value::from("setreg"),
+            Value::Array(vec![
+                Value::from(r_name),
+                Value::Array(val_lines.clone()),
+                Value::from(regtype.as_str()),
+            ]),
+        ],
+    );
+    if r_name != "\"" {
+        let _ = s.call(
+            "nvim_call_function",
+            vec![
+                Value::from("setreg"),
+                Value::Array(vec![
+                    Value::from("\""),
+                    Value::Array(val_lines.clone()),
+                    Value::from(regtype.as_str()),
+                ]),
+            ],
+        );
+    }
+    // Also sync to system clipboard registers '+' and '*'
+    for clip in ["+", "*"] {
+        let _ = s.call(
+            "nvim_call_function",
+            vec![
+                Value::from("setreg"),
+                Value::Array(vec![
+                    Value::from(clip),
+                    Value::Array(val_lines.clone()),
+                    Value::from(regtype.as_str()),
+                ]),
+            ],
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -238,6 +377,7 @@ fn main() {
             nvim_get_state,
             nvim_input,
             nvim_paste_text,
+            nvim_set_register,
             nvim_set_buffer
         ])
         .run(tauri::generate_context!())

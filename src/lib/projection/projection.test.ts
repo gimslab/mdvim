@@ -3,6 +3,7 @@ import {
   parseMarkdown,
   projectLines,
   serializeMarkdown,
+  extractMarkdownRange,
   applyProjected,
   reparseCompletedLines,
 } from './index';
@@ -135,5 +136,22 @@ describe('mdvim projection engine', () => {
     expect(h3[0].prefix).toBe('   # ');
     expect(h4[0].prefix).toBe('');
     expect(projectLines(h4)).toEqual(['    # Title']);
+  });
+
+  it('extracts source markdown range for linewise (V) and characterwise (v) yank', () => {
+    const src = '# 안녕하세요\n- 항목 **굵은글씨** 테스트\n---';
+    const model = parseMarkdown(src);
+
+    // Linewise yank on line 0 (Heading)
+    const yLine0 = extractMarkdownRange(model, 0, 0, 0, 4, 'V');
+    expect(yLine0).toEqual(['# 안녕하세요']);
+
+    // Linewise yank on line 1 (List item with bold)
+    const yLine1 = extractMarkdownRange(model, 1, 0, 1, 10, 'V');
+    expect(yLine1).toEqual(['- 항목 **굵은글씨** 테스트']);
+
+    // Characterwise yank on "굵은글씨" (cols 5 to 8 of line 1 chars: '항', '목', ' ', '굵', '은', '글', '씨')
+    const yBold = extractMarkdownRange(model, 1, 3, 1, 6, 'v');
+    expect(yBold).toEqual(['**굵은글씨**']);
   });
 });
