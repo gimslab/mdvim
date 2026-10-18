@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>mdvim Spike 2: Tauri + Neovim + Korean IME (Light Theme)</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Pretendard', 'Noto Sans KR', system-ui, -apple-system, sans-serif;
+      background: #ffffff;
+      color: #18181b;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 14px;
+      background: #f4f4f5;
+      border-bottom: 1px solid #e4e4e7;
+      gap: 12px;
+      font-size: 13px;
+    }
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    button {
+      background: #ffffff;
+      color: #27272a;
+      border: 1px solid #d4d4d8;
+      border-radius: 6px;
+      padding: 5px 10px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    button:hover {
+      background: #f4f4f5;
+    }
+    button.active {
+      background: #2563eb;
+      color: #ffffff;
+      border-color: #1d4ed8;
+    }
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      min-height: 0;
+    }
+    #editor-pane {
+      position: relative;
+      padding: 20px 28px;
+      overflow-y: auto;
+      outline: none;
+      cursor: text;
+      background: #ffffff;
+    }
+    #ime-input {
+      position: fixed;
+      top: 0;
+      left: 0;
+      opacity: 0;
+      pointer-events: none;
+      width: 10px;
+      height: 20px;
+      border: none;
+      outline: none;
+      padding: 0;
+      z-index: -1;
+    }
+    .line {
+      min-height: 1.65em;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      word-break: break-all;
+      padding: 1px 4px;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', 'D2Coding', monospace;
+      font-size: 15px;
+      color: #18181b;
+    }
+    .line.active-line {
+      background: #f4f4f5;
+    }
+    /* Rendered View Styling (Light Theme) */
+    .rendered .line.h1 {
+      font-size: 24px;
+      font-weight: 700;
+      color: #1d4ed8;
+      border-bottom: 1px solid #e4e4e7;
+      padding-bottom: 4px;
+      margin-bottom: 4px;
+    }
+    .rendered .line.h2 {
+      font-size: 20px;
+      font-weight: 700;
+      color: #1e40af;
+    }
+    .rendered .line.h3 {
+      font-size: 17px;
+      font-weight: 700;
+      color: #1e3a8a;
+    }
+    .rendered .line.ul::before {
+      content: "• ";
+      color: #2563eb;
+      font-weight: bold;
+    }
+    .bold-run {
+      font-weight: 700;
+      color: #b45309;
+      background: #fef3c7;
+      border-radius: 2px;
+    }
+    .cursor-block {
+      background: #2563eb;
+      color: #ffffff;
+      border-radius: 2px;
+    }
+    .cursor-bar {
+      border-left: 2px solid #ea580c;
+      margin-left: -1px;
+    }
+    .preedit {
+      background: #ffedd5;
+      color: #9a3412;
+      border-bottom: 2px dashed #ea580c;
+      padding: 0 2px;
+      border-radius: 2px;
+    }
+    #side-pane {
+      border-left: 1px solid #e4e4e7;
+      background: #fafafa;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      font-size: 12px;
+    }
+    .panel-section {
+      padding: 10px 12px;
+      border-bottom: 1px solid #e4e4e7;
+    }
+    .panel-title {
+      font-weight: 700;
+      color: #52525b;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      font-size: 11px;
+    }
+    pre.raw-md {
+      margin: 0;
+      font-family: monospace;
+      font-size: 12px;
+      color: #15803d;
+      white-space: pre-wrap;
+      max-height: 170px;
+      overflow-y: auto;
+      background: #ffffff;
+      padding: 8px;
+      border-radius: 4px;
+      border: 1px solid #e4e4e7;
+    }
+    #event-log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 12px;
+      font-family: monospace;
+      font-size: 11px;
+      line-height: 1.45;
+      background: #ffffff;
+    }
+    .log-entry { margin-bottom: 3px; border-bottom: 1px dashed #e4e4e7; padding-bottom: 2px; }
+    .log-comp { color: #c2410c; }
+    .log-key { color: #0369a1; }
+    .log-nvim { color: #6d28d9; }
+    footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 14px;
+      background: #f4f4f5;
+      border-top: 1px solid #e4e4e7;
+      font-family: monospace;
+      font-size: 12px;
+      color: #3f3f46;
+    }
+    .mode-badge {
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-weight: 700;
+    }
+    .mode-n { background: #2563eb; color: #fff; }
+    .mode-i { background: #ea580c; color: #fff; }
+    .mode-v { background: #9333ea; color: #fff; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="toolbar-group">
+      <strong>mdvim Spike 2</strong>
+      <button id="btn-rendered" class="active">렌더링 뷰 (WYSIWYG 투영)</button>
+      <button id="btn-code">코드 뷰 (원본 마크다운)</button>
+    </div>
+    <div class="toolbar-group">
+      <button id="btn-clear-log">로그 지우기</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="editor-pane" class="rendered" tabindex="0">
+      <textarea id="ime-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+      <div id="lines-container"></div>
+    </div>
+
+    <div id="side-pane">
+      <div class="panel-section">
+        <div class="panel-title">실제 마크다운 원본 (역변환 결과)</div>
+        <pre class="raw-md" id="raw-md-preview"></pre>
+      </div>
+      <div class="panel-section" style="padding-bottom:4px;">
+        <div class="panel-title">IME / Key / Neovim 이벤트 로그</div>
+      </div>
+      <div id="event-log"></div>
+    </div>
+  </main>
+
+  <footer>
+    <div>
+      <span id="mode-badge" class="mode-badge mode-n">NORMAL</span>
+      <span id="cursor-info" style="margin-left:10px;">Ln 1, Col 1</span>
+      <span id="preedit-status" style="margin-left:12px; color:#c2410c;"></span>
+    </div>
+    <div id="focus-status" style="color:#52525b;"># 제목, - 목록, **굵게** 입력 후 Enter/줄 이동/Esc 시 즉시 렌더링!</div>
+  </footer>
+
+  <script>
+    const invoke = window.__TAURI__.core.invoke;
+
+    // --- Spike 1 Projection Model + Live Line Re-parsing on Line Leave / Enter / Esc ---
+    const PREFIX_RE = /^(\s*(?:[-*+]|\d+\.) |#{1,6} )/;
+    const BOLD_RE = /\*\*(.+?)\*\*/g;
+
+    function parseLine(raw) {
+      const m = PREFIX_RE.exec(raw);
+      const prefix = m ? m[1] : '';
+      const body = raw.slice(prefix.length);
+      const chars = [];
+      let last = 0;
+      for (const bm of body.matchAll(BOLD_RE)) {
+        for (const c of Array.from(body.slice(last, bm.index))) chars.push({ c, b: false });
+        for (const c of Array.from(bm[1])) chars.push({ c, b: true });
+        last = bm.index + bm[0].length;
+      }
+      for (const c of Array.from(body.slice(last))) chars.push({ c, b: false });
+      return { prefix, chars, raw, dirty: false };
+    }
+
+    function parseMd(text) { return text.split('\n').map(parseLine); }
+    function projectModel(model) { return model.map(l => l.chars.map(x => x.c).join('')); }
+
+    function serializeLine(l) {
+      if (!l.dirty) return l.raw;
+      let out = l.prefix;
+      let i = 0;
+      const cs = l.chars;
+      while (i < cs.length) {
+        let j = i;
+        while (j < cs.length && cs[j].b === cs[i].b) j++;
+        const s = cs.slice(i, j).map(x => x.c).join('');
+        if (cs[i].b) {
+          const m = /^(\s*)(.*?)(\s*)$/s.exec(s);
+          out += m[2] ? `${m[1]}**${m[2]}**${m[3]}` : s;
+        } else out += s;
+        i = j;
+      }
+      return out;
+    }
+
+    function serializeModel(model) { return model.map(serializeLine).join('\n'); }
+
+    function locate(model, idx) {
+      let rest = idx;
+      for (let li = 0; li < model.length; li++) {
+        const n = model[li].chars.length;
+        if (rest <= n) return [li, rest];
+        rest -= n + 1;
+      }
+      return [model.length - 1, model[model.length - 1].chars.length];
+    }
+
+    function locateFirstDeletedStyle(model, sl, sc, el, ec) {
+      for (let li = sl; li <= el; li++) {
+        const from = li === sl ? sc : 0;
+        const to = li === el ? ec : model[li].chars.length;
+        if (from < to) return model[li].chars[from].b;
+      }
+      return null;
+    }
+
+    function applyProjected(model, newLines) {
+      const oldFlat = Array.from(projectModel(model).join('\n'));
+      const newFlat = Array.from(newLines.join('\n'));
+      let p = 0;
+      while (p < oldFlat.length && p < newFlat.length && oldFlat[p] === newFlat[p]) p++;
+      let s = 0;
+      while (
+        s < oldFlat.length - p && s < newFlat.length - p &&
+        oldFlat[oldFlat.length - 1 - s] === newFlat[newFlat.length - 1 - s]
+      ) s++;
+      if (p === oldFlat.length && p === newFlat.length) return model;
+
+      const a = p;
+      const b = oldFlat.length - s;
+      const ins = newFlat.slice(p, newFlat.length - s);
+      const [sl, sc] = locate(model, a);
+      const [el, ec] = locate(model, b);
+
+      const left = model[sl].chars.slice(0, sc);
+      const right = model[el].chars.slice(ec);
+
+      let bold = false;
+      const firstDeleted = locateFirstDeletedStyle(model, sl, sc, el, ec);
+      if (firstDeleted !== null) bold = firstDeleted;
+      else if (left.length) bold = left[left.length - 1].b;
+
+      const segs = [[]];
+      for (const c of ins) {
+        if (c === '\n') segs.push([]);
+        else segs[segs.length - 1].push({ c, b: bold });
+      }
+      const k = segs.length - 1;
+      const mk = (prefix, chars) => ({ prefix, chars, raw: '', dirty: true });
+      const result = [];
+      if (k === 0) {
+        const prefix = left.length ? model[sl].prefix : model[el].prefix;
+        result.push(mk(prefix, [...left, ...segs[0], ...right]));
+      } else {
+        // When Enter splits a line, keep prefix on the line that retained the start, new line starts empty prefix
+        result.push(mk(left.length ? model[sl].prefix : '', [...left, ...segs[0]]));
+        for (let i = 1; i < k; i++) result.push(mk('', segs[i]));
+        result.push(mk(left.length ? '' : model[el].prefix, [...segs[k], ...right]));
+      }
+      return [...model.slice(0, sl), ...result, ...model.slice(el + 1)];
+    }
+
+    // --- State ---
+    let viewMode = 'rendered';
+    let mdModel = [];
+    let nvimState = { lines: [], cursor_row: 0, cursor_col_char: 0, mode: 'n' };
+    let isComposing = false;
+    let preeditText = '';
+
+    let rpcQueue = Promise.resolve();
+    function enqueueRpc(fn) {
+      rpcQueue = rpcQueue.then(fn, fn);
+      return rpcQueue;
+    }
+
+    const imeInput = document.getElementById('ime-input');
+    const editorPane = document.getElementById('editor-pane');
+    const linesContainer = document.getElementById('lines-container');
+    const rawMdPreview = document.getElementById('raw-md-preview');
+    const eventLog = document.getElementById('event-log');
+    const modeBadge = document.getElementById('mode-badge');
+    const cursorInfo = document.getElementById('cursor-info');
+    const preeditStatus = document.getElementById('preedit-status');
+
+    function logEvent(kind, msg) {
+      const div = document.createElement('div');
+      div.className = `log-entry log-${kind}`;
+      const ts = new Date().toISOString().slice(11, 23);
+      div.textContent = `[${ts}] ${msg}`;
+      eventLog.prepend(div);
+      while (eventLog.children.length > 80) eventLog.lastChild.remove();
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function render() {
+      const isInsert = nvimState.mode.startsWith('i');
+      modeBadge.textContent = isInsert ? 'INSERT' : (nvimState.mode.startsWith('v') || nvimState.mode.startsWith('V') ? 'VISUAL' : 'NORMAL');
+      modeBadge.className = `mode-badge ${isInsert ? 'mode-i' : (nvimState.mode.startsWith('v') ? 'mode-v' : 'mode-n')}`;
+      const blockTag = nvimState.blocking ? ' [키 입력 대기 중]' : '';
+      cursorInfo.textContent = `Ln ${nvimState.cursor_row + 1}, Col ${nvimState.cursor_col_char + 1} (mode: ${nvimState.mode}${blockTag})`;
+      preeditStatus.textContent = isComposing ? `조합 중(preedit): "${preeditText}"` : '';
+
+      rawMdPreview.textContent = serializeModel(mdModel);
+
+      linesContainer.innerHTML = '';
+      const lines = nvimState.lines;
+
+      lines.forEach((lineText, rowIdx) => {
+        const div = document.createElement('div');
+        let cls = 'line';
+        if (rowIdx === nvimState.cursor_row) cls += ' active-line';
+
+        if (viewMode === 'rendered' && mdModel[rowIdx]) {
+          const pfx = mdModel[rowIdx].prefix;
+          if (pfx === '# ') cls += ' h1';
+          else if (pfx === '## ') cls += ' h2';
+          else if (pfx === '### ') cls += ' h3';
+          else if (/^\s*[-*+] $/.test(pfx)) cls += ' ul';
+        }
+        div.className = cls;
+
+        const chars = Array.from(lineText);
+        const col = nvimState.cursor_col_char;
+        const modelChars = (viewMode === 'rendered' && mdModel[rowIdx]) ? mdModel[rowIdx].chars : null;
+
+        let html = '';
+        for (let i = 0; i <= chars.length; i++) {
+          const ch = i < chars.length ? escapeHtml(chars[i]) : ' ';
+          const isBold = modelChars && modelChars[i] ? modelChars[i].b : false;
+          const isCursor = (rowIdx === nvimState.cursor_row && i === col);
+
+          if (isCursor && isComposing && preeditText) {
+            html += `<span class="preedit">${escapeHtml(preeditText)}</span>`;
+          }
+
+          if (i < chars.length) {
+            let spanCls = [];
+            if (isBold) spanCls.push('bold-run');
+            if (isCursor) spanCls.push(isInsert ? 'cursor-bar' : 'cursor-block');
+            if (spanCls.length) {
+              html += `<span class="${spanCls.join(' ')}">${ch}</span>`;
+            } else {
+              html += ch;
+            }
+          } else if (isCursor) {
+            html += `<span class="${isInsert ? 'cursor-bar' : 'cursor-block'}">&nbsp;</span>`;
+          }
+        }
+
+        div.innerHTML = html || '&nbsp;';
+        linesContainer.appendChild(div);
+      });
+    }
+
+    // Re-parse any dirty line when the user leaves that line (e.g. presses Enter, j/k) or exits Insert mode (Esc).
+    async function reparseCompletedLines(prevRow, prevMode, newState) {
+      if (viewMode !== 'rendered' || newState.blocking) return newState;
+
+      const leftLine = newState.cursor_row !== prevRow;
+      const exitedInsert = prevMode.startsWith('i') && !newState.mode.startsWith('i');
+      if (!leftLine && !exitedInsert) return newState;
+
+      let bufferChanged = false;
+      let newCursorCol = newState.cursor_col_char;
+
+      for (let i = 0; i < mdModel.length; i++) {
+        // Re-parse all dirty lines that are NOT currently being edited in Insert mode
+        const isCurrentInsertLine = newState.mode.startsWith('i') && i === newState.cursor_row;
+        if (isCurrentInsertLine || !mdModel[i].dirty) continue;
+
+        const rawLine = serializeLine(mdModel[i]);
+        const reparsed = parseLine(rawLine);
+        const oldVisible = mdModel[i].chars.map(x => x.c).join('');
+        const newVisible = reparsed.chars.map(x => x.c).join('');
+
+        // Check if markdown syntax (# , - , **bold**) was recognized
+        const styleChanged =
+          reparsed.prefix !== mdModel[i].prefix ||
+          oldVisible !== newVisible ||
+          reparsed.chars.some((ch, idx) => !mdModel[i].chars[idx] || ch.b !== mdModel[i].chars[idx].b);
+
+        if (styleChanged) {
+          logEvent('nvim', `즉시 렌더링 적용 (Ln ${i + 1}): ${JSON.stringify(rawLine)} -> prefix=${JSON.stringify(reparsed.prefix)} visible=${JSON.stringify(newVisible)}`);
+          if (i === newState.cursor_row) {
+            const removedChars = Array.from(oldVisible).length - Array.from(newVisible).length;
+            newCursorCol = Math.max(0, newCursorCol - Math.max(0, removedChars));
+          }
+          mdModel[i] = reparsed;
+          if (oldVisible !== newVisible) {
+            bufferChanged = true;
+          }
+        }
+      }
+
+      if (bufferChanged) {
+        const projected = projectModel(mdModel);
+        const syncedState = await invoke('nvim_set_buffer', {
+          lines: projected,
+          cursorRow: newState.cursor_row,
+          cursorColChar: newCursorCol,
+        });
+        return syncedState;
+      }
+      return newState;
+    }
+
+    async function syncFromNvimState(state) {
+      const prevRow = nvimState.cursor_row;
+      const prevMode = nvimState.mode;
+
+      if (viewMode === 'rendered') {
+        mdModel = applyProjected(mdModel, state.lines);
+        state = await reparseCompletedLines(prevRow, prevMode, state);
+      } else {
+        mdModel = parseMd(state.lines.join('\n'));
+      }
+      nvimState = state;
+      render();
+    }
+
+    function sendNvimKeys(keys, reason = '') {
+      return enqueueRpc(async () => {
+        logEvent('nvim', `nvim_input(${JSON.stringify(keys)}) ${reason}`);
+        const st = await invoke('nvim_input', { keys });
+        await syncFromNvimState(st);
+      });
+    }
+
+    function sendNvimPaste(text, reason = '') {
+      return enqueueRpc(async () => {
+        logEvent('nvim', `nvim_paste_text(${JSON.stringify(text)}) ${reason}`);
+        const st = await invoke('nvim_paste_text', { text });
+        await syncFromNvimState(st);
+      });
+    }
+
+    async function switchViewMode(targetMode) {
+      if (viewMode === targetMode) return;
+      const fullMd = serializeModel(mdModel);
+      mdModel = parseMd(fullMd);
+      viewMode = targetMode;
+
+      editorPane.className = viewMode === 'rendered' ? 'rendered' : 'code';
+      document.getElementById('btn-rendered').classList.toggle('active', viewMode === 'rendered');
+      document.getElementById('btn-code').classList.toggle('active', viewMode === 'code');
+
+      const targetLines = viewMode === 'rendered' ? projectModel(mdModel) : fullMd.split('\n');
+      const st = await invoke('nvim_set_buffer', {
+        lines: targetLines,
+        cursorRow: nvimState.cursor_row,
+        cursorColChar: nvimState.cursor_col_char
+      });
+      nvimState = st;
+      render();
+      imeInput.focus();
+    }
+
+    imeInput.addEventListener('compositionstart', () => {
+      isComposing = true;
+      preeditText = '';
+      logEvent('comp', 'compositionstart');
+      render();
+    });
+
+    imeInput.addEventListener('compositionupdate', (e) => {
+      isComposing = true;
+      preeditText = e.data || '';
+      logEvent('comp', `compositionupdate data=${JSON.stringify(preeditText)}`);
+      render();
+    });
+
+    imeInput.addEventListener('compositionend', (e) => {
+      const committed = e.data || '';
+      logEvent('comp', `compositionend data=${JSON.stringify(committed)}`);
+      isComposing = false;
+      preeditText = '';
+
+      if (committed && nvimState.mode.startsWith('i')) {
+        sendNvimPaste(committed, '(from compositionend)');
+      } else {
+        render();
+      }
+    });
+
+    imeInput.addEventListener('keydown', (e) => {
+      logEvent('key', `keydown key=${JSON.stringify(e.key)} code=${e.code} isComposing=${e.isComposing} keyCode=${e.keyCode}`);
+
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyB' && viewMode === 'rendered') {
+        e.preventDefault();
+        const row = mdModel[nvimState.cursor_row];
+        if (row && row.chars[nvimState.cursor_col_char]) {
+          let s = nvimState.cursor_col_char;
+          let end = s;
+          while (s > 0 && row.chars[s - 1].c !== ' ') s--;
+          while (end < row.chars.length && row.chars[end].c !== ' ') end++;
+          const targetBold = !row.chars[nvimState.cursor_col_char].b;
+          for (let k = s; k < end; k++) row.chars[k].b = targetBold;
+          row.dirty = true;
+          logEvent('nvim', `Ctrl+B toggled bold [${s}, ${end}) -> ${targetBold}`);
+          render();
+        }
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (isComposing) {
+          const pending = preeditText;
+          isComposing = false;
+          preeditText = '';
+          imeInput.blur();
+          imeInput.value = '';
+          imeInput.focus();
+          if (pending && nvimState.mode.startsWith('i')) {
+            sendNvimPaste(pending, '(Esc preedit commit)');
+          }
+        }
+        sendNvimKeys('<Esc>', '(Escape)');
+        return;
+      }
+
+      if (isComposing || e.isComposing || e.keyCode === 229 || e.key === 'Process' || e.key === 'Unidentified') {
+        return;
+      }
+
+      if (e.key.length === 1 && e.key.charCodeAt(0) > 127) {
+        e.preventDefault();
+        return;
+      }
+
+      e.preventDefault();
+
+      const specialMap = {
+        Backspace: '<BS>',
+        Enter: '<CR>',
+        Tab: '<Tab>',
+        ArrowLeft: '<Left>',
+        ArrowRight: '<Right>',
+        ArrowUp: '<Up>',
+        ArrowDown: '<Down>',
+        Delete: '<Del>',
+      };
+
+      if (specialMap[e.key]) {
+        sendNvimKeys(specialMap[e.key]);
+        return;
+      }
+
+      if (e.ctrlKey && e.code.startsWith('Key')) {
+        const letter = e.code[3].toLowerCase();
+        sendNvimKeys(`<C-${letter}>`);
+        return;
+      }
+
+      if (e.key.length === 1) {
+        const k = e.key === '<' ? '<lt>' : e.key;
+        sendNvimKeys(k);
+      }
+    });
+
+    editorPane.addEventListener('mousedown', () => {
+      setTimeout(() => imeInput.focus(), 0);
+    });
+    imeInput.addEventListener('focus', () => {
+      document.getElementById('focus-status').textContent = '포커스: 활성 (# 제목, - 목록, **굵게** 치고 Enter/Esc 테스트)';
+      document.getElementById('focus-status').style.color = '#15803d';
+    });
+    imeInput.addEventListener('blur', () => {
+      document.getElementById('focus-status').textContent = '포커스: 비활성 (에디터 영역을 클릭하세요)';
+      document.getElementById('focus-status').style.color = '#dc2626';
+    });
+
+    document.getElementById('btn-rendered').addEventListener('click', () => switchViewMode('rendered'));
+    document.getElementById('btn-code').addEventListener('click', () => switchViewMode('code'));
+    document.getElementById('btn-clear-log').addEventListener('click', () => { eventLog.innerHTML = ''; });
+
+    // Initialize
+    (async () => {
+      const st = await invoke('nvim_get_state');
+      mdModel = parseMd(st.lines.join('\n'));
+      const projected = projectModel(mdModel);
+      const st2 = await invoke('nvim_set_buffer', {
+        lines: projected,
+        cursorRow: 0,
+        cursorColChar: 0
+      });
+      nvimState = st2;
+      render();
+      imeInput.focus();
+      logEvent('nvim', 'Ready (Light Theme + Live Markdown Re-parse on Line Leave/Enter/Esc)');
+    })();
+  </script>
+</body>
+</html>
