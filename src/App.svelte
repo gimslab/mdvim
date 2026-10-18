@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
+  import { open, save } from '@tauri-apps/plugin-dialog';
+  import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
   import { defaultConfig, resolveShortcut, parseTomlConfig, type MdvimConfig } from './lib/config';
   import { t } from './lib/i18n';
   import {
@@ -217,6 +219,11 @@
       tab.mdModel = parseMarkdown(state.lines.join('\n'));
     }
 
+    // If buffer content changed, mark tab as dirty (unsaved)
+    if (state.lines.join('\n') !== nvimState.lines.join('\n')) {
+      tab.dirty = true;
+    }
+
     nvimState = state;
   }
 
@@ -333,6 +340,83 @@
     await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
   }
 
+  async function openFile() {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: 'Markdown & Text', extensions: ['md', 'markdown', 'txt', 'text'] }],
+      });
+      if (!selected) return;
+      const filePath = typeof selected === 'string' ? selected : (selected as any).path;
+      if (!filePath) return;
+
+      const content = await readTextFile(filePath);
+      const fileName = filePath.split(/[/\\]/).pop() || 'document.md';
+
+      // Check if current tab is an untouched untitled tab
+      const current = tabs[activeTabIndex];
+      const isCleanUntitled = current && !current.path && !current.dirty && current.title.startsWith('untitled');
+
+      const newDoc: TabDoc = {
+        id: `tab-${Date.now()}`,
+        title: fileName,
+        path: filePath,
+        viewMode: current?.viewMode || 'rendered',
+        mdModel: parseMarkdown(content),
+        dirty: false,
+      };
+
+      if (isCleanUntitled) {
+        tabs[activeTabIndex] = newDoc;
+      } else {
+        tabs.push(newDoc);
+        activeTabIndex = tabs.length - 1;
+      }
+
+      await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
+    } catch (err) {
+      console.error('Failed to open file:', err);
+    }
+  }
+
+  async function saveFileAs(): Promise<boolean> {
+    const tab = tabs[activeTabIndex];
+    try {
+      const filePath = await save({
+        defaultPath: tab.path || tab.title || 'document.md',
+        filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
+      });
+      if (!filePath) return false;
+
+      const markdown = serializeMarkdown(tab.mdModel);
+      await writeTextFile(filePath, markdown);
+
+      tab.path = filePath;
+      tab.title = filePath.split(/[/\\]/).pop() || tab.title;
+      tab.dirty = false;
+      return true;
+    } catch (err) {
+      console.error('Failed to save file as:', err);
+      return false;
+    }
+  }
+
+  async function saveFile(): Promise<boolean> {
+    const tab = tabs[activeTabIndex];
+    if (!tab.path) {
+      return await saveFileAs();
+    }
+    try {
+      const markdown = serializeMarkdown(tab.mdModel);
+      await writeTextFile(tab.path, markdown);
+      tab.dirty = false;
+      return true;
+    } catch (err) {
+      console.error('Failed to save file:', err);
+      return false;
+    }
+  }
+
   const commandRegistry = createDefaultRegistry({
     toggleViewMode: () => switchViewMode(activeTab.viewMode === 'rendered' ? 'code' : 'rendered'),
     switchViewMode: (m) => switchViewMode(m),
@@ -344,6 +428,9 @@
     prevTab: () => prevTab(),
     closeActiveTab: () => closeActiveTab(),
     toggleInspector: () => { showInspector = !showInspector; },
+    openFile: () => openFile(),
+    saveFile: () => saveFile(),
+    saveFileAs: () => saveFileAs(),
   });
 
   let commandContext = $derived<CommandContext>({
@@ -651,13 +738,27 @@
           class="tab-btn {idx === activeTabIndex ? 'active' : ''}"
           onclick={() => selectTab(idx)}
         >
-          {tab.title}
+          {tab.title}{tab.dirty ? ' •' : ''}
         </button>
       {/each}
       <button class="tab-add-btn" onclick={addNewTab}>{msg.newTab}</button>
     </div>
 
     <div class="view-switcher">
+      <button
+        class="action-btn"
+        onclick={openFile}
+        title="파일 열기 (Ctrl+O)"
+      >
+        📂 {msg.openFile}
+      </button>
+      <button
+        class="action-btn"
+        onclick={saveFile}
+        title="파일 저장 (Ctrl+S)"
+      >
+        💾 {msg.saveFile}
+      </button>
       <button
         class={activeTab.viewMode === 'rendered' ? 'active' : ''}
         onclick={() => switchViewMode('rendered')}

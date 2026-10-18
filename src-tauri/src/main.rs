@@ -584,6 +584,8 @@ fn main() {
     let pend_for_setup = pending_requests.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .manage(AppState(Mutex::new(session)))
         .manage(reported_state.clone())
         .manage(pending_requests.clone())

@@ -37,6 +37,9 @@ export const defaultConfig: MdvimConfig = {
     { key: 'Ctrl+W', when: 'always', command: 'tab.close' },
     { key: 'Ctrl+Tab', when: 'always', command: 'tab.next' },
     { key: 'Ctrl+Shift+Tab', when: 'always', command: 'tab.prev' },
+    { key: 'Ctrl+O', when: 'always', command: 'file.open' },
+    { key: 'Ctrl+S', when: 'always', command: 'file.save' },
+    { key: 'Ctrl+Shift+S', when: 'always', command: 'file.saveAs' },
   ],
 };
 

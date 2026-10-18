@@ -11,7 +11,9 @@ export function createDefaultRegistry(actions: {
   prevTab: () => void | Promise<void>;
   closeActiveTab: () => void | Promise<void>;
   toggleInspector: () => void;
+  openFile?: () => void | Promise<void>;
   saveFile?: () => void | Promise<void>;
+  saveFileAs?: () => void | Promise<void>;
 }): CommandRegistry {
   const registry = new CommandRegistry();
 
@@ -102,6 +104,17 @@ export function createDefaultRegistry(actions: {
     },
   ];
 
+  if (actions.openFile) {
+    commands.push({
+      id: 'file.open',
+      titleKo: '파일: 문서 열기',
+      titleEn: 'File: Open Document',
+      category: 'Editor',
+      defaultShortcut: 'Ctrl+O',
+      action: () => actions.openFile!(),
+    });
+  }
+
   if (actions.saveFile) {
     commands.push({
       id: 'file.save',
@@ -110,6 +123,17 @@ export function createDefaultRegistry(actions: {
       category: 'Editor',
       defaultShortcut: 'Ctrl+S',
       action: () => actions.saveFile!(),
+    });
+  }
+
+  if (actions.saveFileAs) {
+    commands.push({
+      id: 'file.saveAs',
+      titleKo: '파일: 다른 이름으로 저장',
+      titleEn: 'File: Save Document As...',
+      category: 'Editor',
+      defaultShortcut: 'Ctrl+Shift+S',
+      action: () => actions.saveFileAs!(),
     });
   }
 

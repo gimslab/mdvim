@@ -147,7 +147,9 @@ node bin/mdvim-ctl.js insert-text "안녕하세요, AI가 작성한 마크다운
 | `tab.prev`        | `Tab` | Switch to previous Tab | `Ctrl+Shift+Tab` |
 | `tab.close`       | `Tab` | Close active Tab | `Ctrl+W` |
 | `editor.toggleInspector` | `Editor` | Toggle Markdown Inspector Sidebar | - |
+| `file.open`       | `Editor` | Open Markdown / Text file via native dialog | `Ctrl+O` |
 | `file.save`       | `Editor` | Save active file | `Ctrl+S` |
+| `file.saveAs`     | `Editor` | Save active file as new file | `Ctrl+Shift+S` |
 
 ---
 
