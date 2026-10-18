@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { defaultConfig, resolveShortcut } from './lib/config';
+  import { defaultConfig, resolveShortcut, parseTomlConfig, type MdvimConfig } from './lib/config';
   import { t } from './lib/i18n';
   import {
     parseMarkdown,
@@ -399,35 +399,40 @@
     }
   }
 
+  function buildKeyCombo(e: KeyboardEvent): string {
+    const parts: string[] = [];
+    if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
+    if (e.altKey) parts.push('Alt');
+    if (e.shiftKey) parts.push('Shift');
+
+    if (e.key === 'F1' || e.key === 'F2' || e.key === 'F3' || e.key === 'F4' || e.key === 'F5' || e.key === 'F6' || e.key === 'F7' || e.key === 'F8' || e.key === 'F9' || e.key === 'F10' || e.key === 'F11' || e.key === 'F12') {
+      parts.push(e.key);
+    } else if (e.code.startsWith('Key')) {
+      parts.push(e.code.slice(3).toUpperCase());
+    } else if (e.key === 'Tab') {
+      parts.push('Tab');
+    }
+    return parts.join('+');
+  }
+
   function handleKeyDown(e: KeyboardEvent) {
     if (showCommandPalette) {
       return;
     }
 
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'P' || e.key === 'p' || e.code === 'KeyP')) {
-      e.preventDefault();
-      showCommandPalette = true;
-      return;
-    }
-
-    if (e.key === 'F1') {
-      e.preventDefault();
-      showCommandPalette = true;
-      return;
-    }
-
-    if ((e.ctrlKey || e.metaKey) && e.code.startsWith('Key')) {
-      const letter = e.code[3].toUpperCase();
-      const combo = `Ctrl+${letter}`;
+    const combo = buildKeyCombo(e);
+    if (combo) {
       const target = resolveShortcut(config, combo, nvimState.mode);
-      if (target === 'app:toggle-bold') {
+      if (target === 'palette.open') {
         e.preventDefault();
-        toggleBoldUnderCursor();
+        showCommandPalette = true;
         return;
       }
-      if (target === 'app:toggle-View') {
+      if (target && target !== 'nvim') {
         e.preventDefault();
-        switchViewMode(activeTab.viewMode === 'rendered' ? 'code' : 'rendered');
+        commandRegistry.execute(target, commandContext).catch((err) => {
+          console.error(`Failed to execute shortcut command ${target}:`, err);
+        });
         return;
       }
     }
@@ -546,6 +551,21 @@
   }
 
   onMount(async () => {
+    // Try to load user configuration from ~/.config/mdvim/config.toml
+    try {
+      const tomlContent = await invoke<string | null>('app_load_config');
+      if (tomlContent) {
+        const parsed = parseTomlConfig(tomlContent);
+        config = {
+          ...defaultConfig,
+          ...parsed,
+          shortcuts: parsed.shortcuts && parsed.shortcuts.length > 0 ? parsed.shortcuts : defaultConfig.shortcuts,
+        };
+      }
+    } catch (err) {
+      console.warn('Failed to load user config.toml, using defaults:', err);
+    }
+
     await loadTabIntoNvim(tabs[0], 0, 0);
 
     // Listen for external IPC control requests (mdvim ctl)

@@ -407,6 +407,39 @@ async fn ctl_response(
     Ok(())
 }
 
+fn get_config_path() -> std::path::PathBuf {
+    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+        })
+        .unwrap_or_else(std::env::temp_dir);
+    config_dir.join("mdvim").join("config.toml")
+}
+
+#[tauri::command]
+async fn app_load_config() -> Result<Option<String>, String> {
+    let path = get_config_path();
+    if path.exists() {
+        std::fs::read_to_string(&path)
+            .map(Some)
+            .map_err(|e| format!("Failed to read config file {:?}: {e}", path))
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+async fn app_save_config(content: String) -> Result<String, String> {
+    let path = get_config_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, content)
+        .map(|_| path.to_string_lossy().to_string())
+        .map_err(|e| format!("Failed to write config file {:?}: {e}", path))
+}
+
 fn get_ipc_socket_path() -> std::path::PathBuf {
     #[cfg(unix)]
     {
@@ -561,7 +594,9 @@ fn main() {
             nvim_set_register,
             nvim_set_buffer,
             ctl_report_state,
-            ctl_response
+            ctl_response,
+            app_load_config,
+            app_save_config
         ])
         .setup(move |app| {
             start_ipc_server(app.handle().clone(), rep_for_setup, pend_for_setup);
