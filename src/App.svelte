@@ -9,7 +9,9 @@
     serializeMarkdown,
     applyProjected,
     reparseCompletedLines,
+    isHorizontalRulePrefix,
     type ProjectedLine,
+    type StyledChar,
   } from './lib/projection';
 
   interface NvimState {
@@ -30,8 +32,15 @@
     dirty: boolean;
   }
 
+  interface RenderSegment {
+    text: string;
+    cls: string;
+    isPreedit?: boolean;
+  }
+
   let config = $state({ ...defaultConfig });
   let msg = $derived(t(config.locale));
+  let showInspector = $state(true);
 
   let tabs = $state<TabDoc[]>([
     {
@@ -43,9 +52,9 @@
         [
           '# mdvim 에디터',
           '',
-          '렌더링 뷰에서 **굵은 글씨**와 Vim 모션을 바로 사용할 수 있습니다.',
-          '- 첫 번째 목록 항목',
-          '- [ ] 할 일 체크박스 항목',
+          '렌더링 뷰에서 **굵은 글씨**, *기울임*, `인라인 코드`와 Vim 모션을 바로 테스트해 보세요.',
+          '- 첫 번째 목록 **중요** 항목',
+          '- [ ] 할 일 체크박스 항목 (클릭하여 완료 토글)',
           '',
           '빈 줄에서 `# 제목` 또는 `**강조**`를 입력하고 Enter나 Esc를 눌러 보세요!',
         ].join('\n')
@@ -55,6 +64,7 @@
   ]);
   let activeTabIndex = $state(0);
   let activeTab = $derived(tabs[activeTabIndex]);
+  let rawMarkdownPreview = $derived(serializeMarkdown(activeTab.mdModel));
 
   let nvimState = $state<NvimState>({
     lines: [],
@@ -73,6 +83,56 @@
   function enqueueRpc(fn: () => Promise<void>) {
     rpcQueue = rpcQueue.then(fn, fn);
     return rpcQueue;
+  }
+
+  /**
+   * Builds contiguous segments for a line WITHOUT any template whitespace between characters,
+   * eliminating the wide letter-spacing bug caused by white-space: pre-wrap.
+   */
+  function buildLineSegments(lineText: string, rowIdx: number): RenderSegment[] {
+    const chars = Array.from(lineText);
+    const isActiveRow = rowIdx === nvimState.cursor_row;
+    const cursorCol = nvimState.cursor_col_char;
+    const isInsert = nvimState.mode.startsWith('i');
+    const modelChars: StyledChar[] | undefined =
+      activeTab.viewMode === 'rendered' ? activeTab.mdModel[rowIdx]?.chars : undefined;
+
+    const segments: RenderSegment[] = [];
+
+    function pushSeg(text: string, cls: string, isPreedit = false) {
+      if (!text) return;
+      const last = segments[segments.length - 1];
+      if (last && !last.isPreedit && !isPreedit && last.cls === cls) {
+        last.text += text;
+      } else {
+        segments.push({ text, cls, isPreedit });
+      }
+    }
+
+    for (let colIdx = 0; colIdx <= chars.length; colIdx++) {
+      const isCursor = isActiveRow && colIdx === cursorCol;
+
+      if (isCursor && isComposing && preeditText) {
+        pushSeg(preeditText, 'preedit', true);
+      }
+
+      if (colIdx < chars.length) {
+        const mc = modelChars?.[colIdx];
+        const classes: string[] = [];
+        if (mc?.b) classes.push('bold-run');
+        if (mc?.i) classes.push('italic-run');
+        if (mc?.code) classes.push('code-run');
+        if (isCursor) classes.push(isInsert ? 'cursor-bar' : 'cursor-block');
+        pushSeg(chars[colIdx], classes.join(' '));
+      } else if (isCursor) {
+        pushSeg('\u00A0', isInsert ? 'cursor-bar' : 'cursor-block');
+      }
+    }
+
+    if (segments.length === 0) {
+      segments.push({ text: '\u00A0', cls: '' });
+    }
+    return segments;
   }
 
   async function loadTabIntoNvim(tab: TabDoc, row = 0, col = 0) {
@@ -157,6 +217,7 @@
     const targetBold = !row.chars[nvimState.cursor_col_char].b;
     for (let k = s; k < end; k++) row.chars[k].b = targetBold;
     row.dirty = true;
+    tab.mdModel = [...tab.mdModel];
   }
 
   function toggleCheckboxOnLine(rowIdx: number) {
@@ -170,6 +231,7 @@
       line.prefix = line.prefix.replace(/\[[xX]\]/, '[ ]');
       line.dirty = true;
     }
+    tab.mdModel = [...tab.mdModel];
   }
 
   async function addNewTab() {
@@ -192,6 +254,8 @@
     await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
   }
 
+  let pendingEnterAfterComposition = false;
+
   function handleCompositionStart() {
     isComposing = true;
     preeditText = '';
@@ -204,10 +268,15 @@
 
   function handleCompositionEnd(e: CompositionEvent) {
     const committed = e.data || '';
+    const shouldSendEnter = pendingEnterAfterComposition;
+    pendingEnterAfterComposition = false;
     isComposing = false;
     preeditText = '';
     if (committed && nvimState.mode.startsWith('i')) {
       sendNvimPaste(committed);
+    }
+    if (shouldSendEnter) {
+      sendNvimKeys('<CR>');
     }
   }
 
@@ -230,6 +299,7 @@
 
     if (e.key === 'Escape') {
       e.preventDefault();
+      pendingEnterAfterComposition = false;
       if (isComposing && imeInputEl) {
         const pending = preeditText;
         isComposing = false;
@@ -242,6 +312,35 @@
         }
       }
       sendNvimKeys('<Esc>');
+      return;
+    }
+
+    // If Enter is pressed while actively composing Hangul, remember to send <CR> right after compositionend
+    if (preeditText && (e.key === 'Enter' || e.code === 'Enter')) {
+      pendingEnterAfterComposition = true;
+      return;
+    }
+
+    // In IBus-Hangul on WebKitGTK, Space or Enter when NOT actively composing Hangul
+    // can still report keyCode === 229. Never swallow Space/Enter/Backspace when preeditText is empty!
+    if (!preeditText && (e.code === 'Space' || e.key === ' ')) {
+      e.preventDefault();
+      isComposing = false;
+      sendNvimKeys('<Space>');
+      return;
+    }
+
+    if (!preeditText && (e.key === 'Enter' || e.code === 'Enter')) {
+      e.preventDefault();
+      isComposing = false;
+      sendNvimKeys('<CR>');
+      return;
+    }
+
+    if (!preeditText && e.key === 'Backspace') {
+      e.preventDefault();
+      isComposing = false;
+      sendNvimKeys('<BS>');
       return;
     }
 
@@ -266,6 +365,7 @@
       Backspace: '<BS>',
       Enter: '<CR>',
       Tab: '<Tab>',
+      ' ': '<Space>',
       ArrowLeft: '<Left>',
       ArrowRight: '<Right>',
       ArrowUp: '<Up>',
@@ -290,17 +390,22 @@
     }
   }
 
-  function lineClass(rowIdx: number): string {
+  function computeLineClass(rowIdx: number, prefix: string | undefined, viewMode: string, cursorRow: number): string {
     let cls = 'line';
-    if (rowIdx === nvimState.cursor_row) cls += ' active-line';
-    if (activeTab.viewMode === 'rendered' && activeTab.mdModel[rowIdx]) {
-      const pfx = activeTab.mdModel[rowIdx].prefix;
-      if (pfx === '# ') cls += ' h1';
-      else if (pfx === '## ') cls += ' h2';
-      else if (pfx === '### ') cls += ' h3';
-      else if (/^\s*[-*+] \[[ xX]\] $/.test(pfx)) cls += ' task-item';
-      else if (/^\s*[-*+] $/.test(pfx)) cls += ' ul';
-      else if (/^\s*>+ $/.test(pfx)) cls += ' quote';
+    if (rowIdx === cursorRow) cls += ' active-line';
+    if (viewMode === 'rendered' && prefix) {
+      if (isHorizontalRulePrefix(prefix)) {
+        cls += ' hr-line';
+        return cls;
+      }
+      const trimmed = prefix.trim();
+      if (trimmed === '#') cls += ' h1';
+      else if (trimmed === '##') cls += ' h2';
+      else if (trimmed === '###') cls += ' h3';
+      else if (/^#{4,6}$/.test(trimmed)) cls += ' h4';
+      else if (/^\s*[-*+] \[[ xX]\] $/.test(prefix)) cls += ' task-item';
+      else if (/^\s*[-*+] $/.test(prefix)) cls += ' ul';
+      else if (/^\s*>+ $/.test(prefix)) cls += ' quote';
     }
     return cls;
   }
@@ -338,6 +443,13 @@
         {msg.codeView}
       </button>
       <button
+        class={showInspector ? 'active' : ''}
+        onclick={() => (showInspector = !showInspector)}
+        title="실제 마크다운 원본 확인 패널 토글"
+      >
+        MD 원본 확인
+      </button>
+      <button
         class="lang-btn"
         onclick={() => (config.locale = config.locale === 'ko' ? 'en' : 'ko')}
       >
@@ -346,63 +458,47 @@
     </div>
   </header>
 
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <main
-    class="editor-pane {activeTab.viewMode}"
-    onmousedown={() => setTimeout(() => imeInputEl?.focus(), 0)}
-  >
-    <textarea
-      bind:this={imeInputEl}
-      class="ime-input"
-      autocomplete="off"
-      autocorrect="off"
-      autocapitalize="off"
-      spellcheck="false"
-      oncompositionstart={handleCompositionStart}
-      oncompositionupdate={handleCompositionUpdate}
-      oncompositionend={handleCompositionEnd}
-      onkeydown={handleKeyDown}
-    ></textarea>
+  <div class="workspace {showInspector ? 'with-inspector' : ''}">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <main
+      class="editor-pane {activeTab.viewMode}"
+      onmousedown={() => setTimeout(() => imeInputEl?.focus(), 0)}
+    >
+      <textarea
+        bind:this={imeInputEl}
+        class="ime-input"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        oncompositionstart={handleCompositionStart}
+        oncompositionupdate={handleCompositionUpdate}
+        oncompositionend={handleCompositionEnd}
+        onkeydown={handleKeyDown}
+      ></textarea>
 
-    <div class="lines-container">
-      {#each nvimState.lines as lineText, rowIdx}
-        {@const chars = Array.from(lineText)}
-        {@const modelLine = activeTab.mdModel[rowIdx]}
-        <div class={lineClass(rowIdx)}>
-          {#if activeTab.viewMode === 'rendered' && modelLine && /^\s*[-*+] \[[ xX]\] $/.test(modelLine.prefix)}
-            <input
-              type="checkbox"
-              class="task-checkbox"
-              checked={/\[[xX]\]/.test(modelLine.prefix)}
-              onchange={() => toggleCheckboxOnLine(rowIdx)}
-            />
-          {/if}
+      <div class="lines-container">
+        {#each nvimState.lines as lineText, rowIdx}
+          {@const modelLine = activeTab.mdModel[rowIdx]}
+          {@const isHr = activeTab.viewMode === 'rendered' && modelLine && isHorizontalRulePrefix(modelLine.prefix) && lineText.length === 0}
+          {@const segments = buildLineSegments(lineText, rowIdx)}
+          <div class={computeLineClass(rowIdx, modelLine?.prefix, activeTab.viewMode, nvimState.cursor_row)}>{#if isHr}<span class="hr-bar {rowIdx === nvimState.cursor_row ? 'hr-active' : ''}"></span>{:else}{#if activeTab.viewMode === 'rendered' && modelLine && /^\s*[-*+] \[[ xX]\] $/.test(modelLine.prefix)}<input
+                type="checkbox"
+                class="task-checkbox"
+                checked={/\[[xX]\]/.test(modelLine.prefix)}
+                onchange={() => toggleCheckboxOnLine(rowIdx)}
+              />{/if}{#each segments as seg}{#if seg.cls}<span class={seg.cls}>{seg.text}</span>{:else}{seg.text}{/if}{/each}{/if}</div>
+        {/each}
+      </div>
+    </main>
 
-          {#each { length: chars.length + 1 } as _, colIdx}
-            {@const isCursor = rowIdx === nvimState.cursor_row && colIdx === nvimState.cursor_col_char}
-            {@const isInsert = nvimState.mode.startsWith('i')}
-            {@const isBold = activeTab.viewMode === 'rendered' && modelLine?.chars[colIdx]?.b}
-
-            {#if isCursor && isComposing && preeditText}
-              <span class="preedit">{preeditText}</span>
-            {/if}
-
-            {#if colIdx < chars.length}
-              <span
-                class="{isBold ? 'bold-run ' : ''}{isCursor
-                  ? isInsert
-                    ? 'cursor-bar'
-                    : 'cursor-block'
-                  : ''}">{chars[colIdx]}</span
-              >
-            {:else if isCursor}
-              <span class={isInsert ? 'cursor-bar' : 'cursor-block'}>&nbsp;</span>
-            {/if}
-          {/each}
-        </div>
-      {/each}
-    </div>
-  </main>
+    {#if showInspector}
+      <aside class="inspector-pane">
+        <div class="inspector-title">실제 마크다운 원본 (실시간 역변환)</div>
+        <pre class="raw-md">{rawMarkdownPreview}</pre>
+      </aside>
+    {/if}
+  </div>
 
   <footer class="statusline">
     <div class="status-left">
@@ -484,12 +580,49 @@
     align-items: center;
     gap: 6px;
   }
-  .editor-pane {
+  .workspace {
     flex: 1;
+    display: grid;
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+  .workspace.with-inspector {
+    grid-template-columns: 1fr 340px;
+  }
+  .editor-pane {
     padding: 24px 36px;
     overflow-y: auto;
     cursor: text;
     position: relative;
+  }
+  .inspector-pane {
+    border-left: 1px solid var(--border-color);
+    background: #fafafa;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .inspector-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .raw-md {
+    margin: 0;
+    flex: 1;
+    font-family: 'JetBrains Mono', 'D2Coding', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #15803d;
+    background: #ffffff;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 10px;
+    white-space: pre-wrap;
+    overflow-y: auto;
   }
   .ime-input {
     position: fixed;
@@ -502,20 +635,21 @@
     z-index: -1;
   }
   .line {
-    min-height: 1.7em;
-    line-height: 1.7;
+    min-height: 1.65em;
+    line-height: 1.65;
     white-space: pre-wrap;
     word-break: break-all;
     padding: 1px 6px;
     border-radius: 4px;
     font-family: 'JetBrains Mono', 'D2Coding', monospace;
     font-size: 15px;
+    letter-spacing: normal;
   }
   .line.active-line {
-    background: var(--bg-active-line);
+    background: #f4f4f5;
   }
   .rendered .line.h1 {
-    font-size: 26px;
+    font-size: 24px;
     font-weight: 700;
     color: #1d4ed8;
     border-bottom: 1px solid var(--border-color);
@@ -523,12 +657,12 @@
     margin-bottom: 6px;
   }
   .rendered .line.h2 {
-    font-size: 21px;
+    font-size: 20px;
     font-weight: 700;
     color: #1e40af;
   }
   .rendered .line.h3 {
-    font-size: 18px;
+    font-size: 17px;
     font-weight: 700;
     color: #1e3a8a;
   }
@@ -542,15 +676,45 @@
     padding-left: 12px;
     color: #475569;
   }
+  .rendered .line.hr-line {
+    display: flex;
+    align-items: center;
+    min-height: 1.65em;
+    padding: 4px 6px;
+  }
+  .hr-bar {
+    display: block;
+    width: 100%;
+    height: 2px;
+    background: #cbd5e1;
+    border-radius: 2px;
+  }
+  .hr-bar.hr-active {
+    background: var(--accent-color);
+    height: 3px;
+  }
   .task-checkbox {
     margin-right: 6px;
     cursor: pointer;
+    vertical-align: middle;
   }
   .bold-run {
     font-weight: 700;
     color: var(--bold-color);
     background: var(--bold-bg);
     border-radius: 2px;
+  }
+  .italic-run {
+    font-style: italic;
+    color: #4338ca;
+  }
+  .code-run {
+    font-family: 'JetBrains Mono', 'D2Coding', monospace;
+    background: #f1f5f9;
+    color: #be123c;
+    padding: 1px 4px;
+    border-radius: 4px;
+    font-size: 0.92em;
   }
   .cursor-block {
     background: var(--cursor-block-bg);
