@@ -141,7 +141,9 @@ node bin/mdvim-ctl.js insert-text "안녕하세요, AI가 작성한 마크다운
 | `view.setCode`    | `View` | Switch to Raw Markdown Code View | - |
 | `format.toggleBold`| `Format` | Toggle Bold (`**text**`) on word at cursor | `Ctrl+B` |
 | `format.toggleItalic`| `Format` | Toggle Italic (`*text*`) on word at cursor | `Ctrl+I` |
+| `format.toggleStrikethrough`| `Format` | Toggle Strikethrough (`~~text~~`) on word at cursor | `Ctrl+D` |
 | `format.toggleCode`| `Format` | Toggle Inline Code (`` `text` ``) at cursor | - |
+| `format.toggleCheckbox`| `Format` | Toggle Task Checkbox (`- [ ]` ⟷ `- [x]`) on current line | `Ctrl+L` |
 | `tab.new`         | `Tab` | Open new Untitled Document Tab | `Ctrl+T` |
 | `tab.next`        | `Tab` | Switch to next Tab | `Ctrl+Tab` |
 | `tab.prev`        | `Tab` | Switch to previous Tab | `Ctrl+Shift+Tab` |
@@ -150,6 +152,7 @@ node bin/mdvim-ctl.js insert-text "안녕하세요, AI가 작성한 마크다운
 | `file.open`       | `Editor` | Open Markdown / Text file via native dialog | `Ctrl+O` |
 | `file.save`       | `Editor` | Save active file | `Ctrl+S` |
 | `file.saveAs`     | `Editor` | Save active file as new file | `Ctrl+Shift+S` |
+| `recent.open.<N>` | `Editor` | Reopen N-th recently opened/saved file | - |
 
 ---
 
