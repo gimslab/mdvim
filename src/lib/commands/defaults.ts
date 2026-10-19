@@ -5,7 +5,9 @@ export function createDefaultRegistry(actions: {
   switchViewMode: (mode: 'rendered' | 'code') => void | Promise<void>;
   toggleBold: () => void;
   toggleItalic: () => void;
+  toggleStrikethrough?: () => void;
   toggleCode: () => void;
+  toggleCheckbox?: () => void;
   newTab: () => void | Promise<void>;
   nextTab: () => void | Promise<void>;
   prevTab: () => void | Promise<void>;
@@ -64,11 +66,27 @@ export function createDefaultRegistry(actions: {
       action: () => actions.toggleItalic(),
     },
     {
+      id: 'format.toggleStrikethrough',
+      titleKo: '서식: 취소선 (Strikethrough) 토글',
+      titleEn: 'Format: Toggle Strikethrough',
+      category: 'Format',
+      defaultShortcut: 'Ctrl+D',
+      action: () => actions.toggleStrikethrough?.(),
+    },
+    {
       id: 'format.toggleCode',
       titleKo: '서식: 인라인 코드 (Code) 토글',
       titleEn: 'Format: Toggle Inline Code',
       category: 'Format',
       action: () => actions.toggleCode(),
+    },
+    {
+      id: 'format.toggleCheckbox',
+      titleKo: '서식: 할 일 체크박스 완료 토글',
+      titleEn: 'Format: Toggle Task Checkbox',
+      category: 'Format',
+      defaultShortcut: 'Ctrl+L',
+      action: () => actions.toggleCheckbox?.(),
     },
     {
       id: 'tab.new',

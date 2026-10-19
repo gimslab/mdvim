@@ -146,6 +146,7 @@
         const classes: string[] = [];
         if (mc?.b) classes.push('bold-run');
         if (mc?.i) classes.push('italic-run');
+        if (mc?.s) classes.push('strike-run');
         if (mc?.code) classes.push('code-run');
         if (isCursor) classes.push(isInsert ? 'cursor-bar' : 'cursor-block');
         pushSeg(chars[colIdx], classes.join(' '));
@@ -260,7 +261,7 @@
     await loadTabIntoNvim(tab, nvimState.cursor_row, nvimState.cursor_col_char);
   }
 
-  function toggleSpanStyleUnderCursor(styleKey: 'b' | 'i' | 'code') {
+  function toggleSpanStyleUnderCursor(styleKey: 'b' | 'i' | 's' | 'code') {
     const tab = tabs[activeTabIndex];
     if (tab.viewMode !== 'rendered') return;
     const row = tab.mdModel[nvimState.cursor_row];
@@ -285,6 +286,10 @@
 
   function toggleItalicUnderCursor() {
     toggleSpanStyleUnderCursor('i');
+  }
+
+  function toggleStrikethroughUnderCursor() {
+    toggleSpanStyleUnderCursor('s');
   }
 
   function toggleCodeUnderCursor() {
@@ -516,6 +521,7 @@
       }
 
       await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
+      await refreshRecentFileCommands();
     } catch (err) {
       console.error('Failed to open file:', err);
     }
@@ -541,6 +547,7 @@
       tab.diskContent = markdown;
       tab.conflictContent = null;
       tab.dirty = false;
+      await refreshRecentFileCommands();
       return true;
     } catch (err) {
       console.error('Failed to save file as:', err);
@@ -588,6 +595,7 @@
       }
       tab.diskContent = markdown;
       tab.dirty = false;
+      await refreshRecentFileCommands();
       return true;
     } catch (err) {
       console.error(`Autosave failed for ${tab.path || tab.title}:`, err);
@@ -624,6 +632,7 @@
       tab.diskContent = markdown;
       tab.conflictContent = null;
       tab.dirty = false;
+      await refreshRecentFileCommands();
       return true;
     } catch (err) {
       console.error('Failed to save file:', err);
@@ -701,7 +710,9 @@
     switchViewMode: (m) => switchViewMode(m),
     toggleBold: () => toggleBoldUnderCursor(),
     toggleItalic: () => toggleItalicUnderCursor(),
+    toggleStrikethrough: () => toggleStrikethroughUnderCursor(),
     toggleCode: () => toggleCodeUnderCursor(),
+    toggleCheckbox: () => toggleCheckboxOnLine(nvimState.cursor_row),
     newTab: () => addNewTab(),
     nextTab: () => nextTab(),
     prevTab: () => prevTab(),
@@ -711,6 +722,26 @@
     saveFile: () => saveFile(),
     saveFileAs: () => saveFileAs(),
   });
+
+  async function refreshRecentFileCommands() {
+    try {
+      const recentPaths = await invoke<string[]>('app_get_recent_files');
+      commandRegistry.unregisterPrefix('recent.open.');
+      recentPaths.forEach((filePath, idx) => {
+        const fileName = filePath.split(/[/\\]/).pop() || filePath;
+        commandRegistry.register({
+          id: `recent.open.${idx + 1}`,
+          titleKo: `최근 파일 열기: ${fileName} (${filePath})`,
+          titleEn: `Open Recent: ${fileName} (${filePath})`,
+          category: 'Editor',
+          when: 'always',
+          action: () => openFile(filePath),
+        });
+      });
+    } catch (err) {
+      // Ignore error
+    }
+  }
 
   let commandContext = $derived<CommandContext>({
     activeTab: {
@@ -975,6 +1006,7 @@
       tabs[0].title = await getNextUntitledName(tabs[0].id);
     }
     await loadTabIntoNvim(tabs[0], 0, 0);
+    await refreshRecentFileCommands();
 
     // Listen for external IPC control requests (mdvim ctl)
     const unlisten = await listen<{ id: number; method: string; params: any }>('ctl-request', async (event) => {
@@ -1442,6 +1474,10 @@
   .italic-run {
     font-style: italic;
     color: #4338ca;
+  }
+  .strike-run {
+    text-decoration: line-through;
+    color: #64748b;
   }
   .code-run {
     font-family: 'JetBrains Mono', 'D2Coding', monospace;

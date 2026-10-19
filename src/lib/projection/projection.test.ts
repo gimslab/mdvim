@@ -154,4 +154,16 @@ describe('mdvim projection engine', () => {
     const yBold = extractMarkdownRange(model, 1, 3, 1, 6, 'v');
     expect(yBold).toEqual(['**굵은글씨**']);
   });
+
+  it('parses, projects, and serializes inline strikethrough (~~text~~)', () => {
+    const src = '일반 ~~취소선 텍스트~~ 끝';
+    let model = parseMarkdown(src);
+    expect(projectLines(model)).toEqual(['일반 취소선 텍스트 끝']);
+    expect(model[0].chars[3].s).toBe(true);
+    expect(serializeMarkdown(model)).toBe(src);
+
+    // Edit inside strikethrough preserves ~~ markers
+    model = applyProjected(model, ['일반 수정된 텍스트 끝']);
+    expect(serializeMarkdown(model)).toBe('일반 ~~수정된 텍스트~~ 끝');
+  });
 });

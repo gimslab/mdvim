@@ -2,6 +2,7 @@ export interface StyledChar {
   c: string;
   b: boolean; // bold (**text**)
   i: boolean; // italic (*text*)
+  s?: boolean; // strikethrough (~~text~~)
   code: boolean; // inline code (`text`)
 }
 
@@ -16,7 +17,7 @@ export interface ProjectedLine {
 export const HR_RE = /^ {0,3}(?:-(?:[ \t]*-){2,}|\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/;
 // CommonMark 4.2 ATX headings & 5.1 Block quotes allow 0-3 leading spaces; lists allow indentation for sublists.
 const PREFIX_RE = /^(?:( {0,3}(?:#{1,6} |>+ ))|([ \t]*(?:[-*+] \[[ xX]\] |[-*+] |\d+\. )))/;
-const INLINE_TOKEN_RE = /(\*\*(.+?)\*\*|`([^`]+)`|\*([^*]+)\*)/g;
+const INLINE_TOKEN_RE = /(\*\*(.+?)\*\*|~~(.+?)~~|`([^`]+)`|\*([^*]+)\*)/g;
 
 export function isHorizontalRulePrefix(prefix: string): boolean {
   return HR_RE.test(prefix);
@@ -35,25 +36,29 @@ export function parseLine(raw: string): ProjectedLine {
   for (const tm of body.matchAll(INLINE_TOKEN_RE)) {
     const idx = tm.index ?? 0;
     for (const c of Array.from(body.slice(last, idx))) {
-      chars.push({ c, b: false, i: false, code: false });
+      chars.push({ c, b: false, i: false, s: false, code: false });
     }
     if (tm[2] !== undefined) {
       for (const c of Array.from(tm[2])) {
-        chars.push({ c, b: true, i: false, code: false });
+        chars.push({ c, b: true, i: false, s: false, code: false });
       }
     } else if (tm[3] !== undefined) {
       for (const c of Array.from(tm[3])) {
-        chars.push({ c, b: false, i: false, code: true });
+        chars.push({ c, b: false, i: false, s: true, code: false });
       }
     } else if (tm[4] !== undefined) {
       for (const c of Array.from(tm[4])) {
-        chars.push({ c, b: false, i: true, code: false });
+        chars.push({ c, b: false, i: false, s: false, code: true });
+      }
+    } else if (tm[5] !== undefined) {
+      for (const c of Array.from(tm[5])) {
+        chars.push({ c, b: false, i: true, s: false, code: false });
       }
     }
     last = idx + tm[0].length;
   }
   for (const c of Array.from(body.slice(last))) {
-    chars.push({ c, b: false, i: false, code: false });
+    chars.push({ c, b: false, i: false, s: false, code: false });
   }
   return { prefix, chars, raw, dirty: false };
 }
@@ -67,7 +72,7 @@ export function projectLines(model: ProjectedLine[]): string[] {
 }
 
 function sameStyle(a: StyledChar, b: StyledChar): boolean {
-  return a.b === b.b && a.i === b.i && a.code === b.code;
+  return a.b === b.b && a.i === b.i && Boolean(a.s) === Boolean(b.s) && a.code === b.code;
 }
 
 export function serializeLine(l: ProjectedLine): string {
@@ -91,6 +96,9 @@ export function serializeLine(l: ProjectedLine): string {
     } else if (cs[idx].b) {
       const m = /^(\s*)(.*?)(\s*)$/s.exec(s);
       out += m && m[2] ? `${m[1]}**${m[2]}**${m[3]}` : s;
+    } else if (cs[idx].s) {
+      const m = /^(\s*)(.*?)(\s*)$/s.exec(s);
+      out += m && m[2] ? `${m[1]}~~${m[2]}~~${m[3]}` : s;
     } else if (cs[idx].i) {
       const m = /^(\s*)(.*?)(\s*)$/s.exec(s);
       out += m && m[2] ? `${m[1]}*${m[2]}*${m[3]}` : s;
@@ -176,13 +184,13 @@ function locateFirstDeletedStyle(
   sc: number,
   el: number,
   ec: number
-): Pick<StyledChar, 'b' | 'i' | 'code'> | null {
+): Pick<StyledChar, 'b' | 'i' | 's' | 'code'> | null {
   for (let li = sl; li <= el; li++) {
     const from = li === sl ? sc : 0;
     const to = li === el ? ec : model[li].chars.length;
     if (from < to) {
       const ch = model[li].chars[from];
-      return { b: ch.b, i: ch.i, code: ch.code };
+      return { b: ch.b, i: ch.i, s: Boolean(ch.s), code: ch.code };
     }
   }
   return null;
@@ -226,13 +234,13 @@ export function applyProjected(model: ProjectedLine[], newLines: string[]): Proj
   const left = model[sl].chars.slice(0, sc);
   const right = model[el].chars.slice(ec);
 
-  let inherited = { b: false, i: false, code: false };
+  let inherited = { b: false, i: false, s: false, code: false };
   const firstDeleted = locateFirstDeletedStyle(model, sl, sc, el, ec);
   if (firstDeleted !== null) {
-    inherited = firstDeleted;
+    inherited = { ...firstDeleted, s: Boolean(firstDeleted.s) };
   } else if (left.length) {
     const prev = left[left.length - 1];
-    inherited = { b: prev.b, i: prev.i, code: prev.code };
+    inherited = { b: prev.b, i: prev.i, s: Boolean(prev.s), code: prev.code };
   }
 
   const segs: StyledChar[][] = [[]];

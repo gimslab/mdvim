@@ -33,6 +33,8 @@ export const defaultConfig: MdvimConfig = {
     { key: 'Ctrl+E', when: 'always', command: 'view.toggleMode' },
     { key: 'Ctrl+B', when: 'insert', command: 'format.toggleBold' },
     { key: 'Ctrl+I', when: 'insert', command: 'format.toggleItalic' },
+    { key: 'Ctrl+D', when: 'insert', command: 'format.toggleStrikethrough' },
+    { key: 'Ctrl+L', when: 'always', command: 'format.toggleCheckbox' },
     { key: 'Ctrl+T', when: 'always', command: 'tab.new' },
     { key: 'Ctrl+W', when: 'always', command: 'tab.close' },
     { key: 'Ctrl+Tab', when: 'always', command: 'tab.next' },

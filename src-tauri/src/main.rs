@@ -666,6 +666,49 @@ fn file_mtime_ms(path: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
+fn get_recent_files_path() -> std::path::PathBuf {
+    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+        })
+        .unwrap_or_else(std::env::temp_dir);
+    config_dir.join("mdvim").join("recent.json")
+}
+
+fn load_recent_files_list() -> Vec<String> {
+    let path = get_recent_files_path();
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(list) = serde_json::from_str::<Vec<String>>(&raw) {
+            return list;
+        }
+    }
+    Vec::new()
+}
+
+fn record_recent_file(file_path: &str) {
+    let trimmed = file_path.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let mut list = load_recent_files_list();
+    list.retain(|p| p != trimmed);
+    list.insert(0, trimmed.to_string());
+    list.truncate(15);
+    let path = get_recent_files_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&list) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+#[tauri::command]
+async fn app_get_recent_files() -> Result<Vec<String>, String> {
+    Ok(load_recent_files_list())
+}
+
 #[derive(Serialize)]
 struct ReadFileResult {
     path: String,
@@ -679,8 +722,10 @@ async fn app_read_file(path: String) -> Result<ReadFileResult, String> {
     let content = std::fs::read_to_string(&resolved)
         .map_err(|e| format!("Failed to read file {:?}: {e}", resolved))?;
     let mtime_ms = file_mtime_ms(&resolved);
+    let resolved_str = resolved.to_string_lossy().to_string();
+    record_recent_file(&resolved_str);
     Ok(ReadFileResult {
-        path: resolved.to_string_lossy().to_string(),
+        path: resolved_str,
         content,
         mtime_ms,
     })
@@ -727,8 +772,10 @@ async fn app_get_cli_files() -> Result<Vec<ReadFileResult>, String> {
         } else {
             (String::new(), 0)
         };
+        let resolved_str = resolved.to_string_lossy().to_string();
+        record_recent_file(&resolved_str);
         results.push(ReadFileResult {
-            path: resolved.to_string_lossy().to_string(),
+            path: resolved_str,
             content,
             mtime_ms,
         });
@@ -743,7 +790,11 @@ async fn app_write_file(path: String, content: String) -> Result<String, String>
         let _ = std::fs::create_dir_all(parent);
     }
     std::fs::write(&resolved, content)
-        .map(|_| resolved.to_string_lossy().to_string())
+        .map(|_| {
+            let s = resolved.to_string_lossy().to_string();
+            record_recent_file(&s);
+            s
+        })
         .map_err(|e| format!("Failed to write file {:?}: {e}", resolved))
 }
 
@@ -815,7 +866,11 @@ async fn app_save_draft(name: String, content: String) -> Result<String, String>
     let base_dir = get_launch_dir();
     let target = find_unique_untitled_path(&base_dir, &name, &[]);
     std::fs::write(&target, content)
-        .map(|_| target.to_string_lossy().to_string())
+        .map(|_| {
+            let s = target.to_string_lossy().to_string();
+            record_recent_file(&s);
+            s
+        })
         .map_err(|e| format!("Failed to write draft {:?}: {e}", target))
 }
 
@@ -983,7 +1038,8 @@ fn main() {
             app_save_draft,
             app_next_untitled_name,
             app_check_file_modified,
-            app_get_cli_files
+            app_get_cli_files,
+            app_get_recent_files
         ])
         .setup(move |app| {
             start_ipc_server(app.handle().clone(), rep_for_setup, pend_for_setup);

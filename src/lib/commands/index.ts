@@ -34,6 +34,14 @@ export class CommandRegistry {
     this.commands.set(cmd.id, cmd);
   }
 
+  unregisterPrefix(prefix: string): void {
+    for (const key of Array.from(this.commands.keys())) {
+      if (key.startsWith(prefix)) {
+        this.commands.delete(key);
+      }
+    }
+  }
+
   get(id: string): CommandDefinition | undefined {
     return this.commands.get(id);
   }
