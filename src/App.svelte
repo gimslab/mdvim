@@ -51,6 +51,9 @@
     viewMode: 'rendered' | 'code';
     mdModel: ProjectedLine[];
     dirty: boolean;
+    lastMtimeMs?: number;
+    diskContent?: string;
+    conflictContent?: string | null;
   }
 
   interface RenderSegment {
@@ -484,7 +487,7 @@
       }
       if (!filePath) return;
 
-      const res = await invoke<{ path: string; content: string }>('app_read_file', { path: filePath });
+      const res = await invoke<{ path: string; content: string; mtime_ms: number }>('app_read_file', { path: filePath });
       const resolvedPath = res.path;
       const content = res.content;
       const fileName = resolvedPath.split(/[/\\]/).pop() || 'document.md';
@@ -500,6 +503,9 @@
         viewMode: current?.viewMode || 'rendered',
         mdModel: parseMarkdown(content),
         dirty: false,
+        lastMtimeMs: res.mtime_ms,
+        diskContent: content,
+        conflictContent: null,
       };
 
       if (isCleanUntitled) {
@@ -532,6 +538,8 @@
 
       tab.path = resolvedPath;
       tab.title = resolvedPath.split(/[/\\]/).pop() || tab.title;
+      tab.diskContent = markdown;
+      tab.conflictContent = null;
       tab.dirty = false;
       return true;
     } catch (err) {
@@ -549,7 +557,7 @@
     }
     const timer = setTimeout(async () => {
       autoSaveTimers.delete(tab.id);
-      if (tab.dirty) {
+      if (tab.dirty && !tab.conflictContent) {
         await autoSaveTab(tab);
       }
     }, config.autoSaveDebounceMs || 1500);
@@ -557,7 +565,7 @@
   }
 
   async function autoSaveTab(tab: TabDoc): Promise<boolean> {
-    if (!tab.dirty) return false;
+    if (!tab.dirty || tab.conflictContent) return false;
     const existing = autoSaveTimers.get(tab.id);
     if (existing) {
       clearTimeout(existing);
@@ -578,6 +586,7 @@
         tab.path = savedPath;
         tab.title = savedPath.split(/[/\\]/).pop() || tab.title;
       }
+      tab.diskContent = markdown;
       tab.dirty = false;
       return true;
     } catch (err) {
@@ -588,7 +597,7 @@
 
   async function autoSaveAllDirtyTabs(): Promise<void> {
     for (const tab of tabs) {
-      if (tab.dirty) {
+      if (tab.dirty && !tab.conflictContent) {
         await autoSaveTab(tab);
       }
     }
@@ -612,12 +621,79 @@
       }
       tab.path = resolvedPath;
       tab.title = resolvedPath.split(/[/\\]/).pop() || tab.title;
+      tab.diskContent = markdown;
+      tab.conflictContent = null;
       tab.dirty = false;
       return true;
     } catch (err) {
       console.error('Failed to save file:', err);
       return false;
     }
+  }
+
+  async function checkExternalFileChanges() {
+    for (let i = 0; i < tabs.length; i++) {
+      const tab = tabs[i];
+      if (!tab.path) continue;
+      try {
+        const res = await invoke<{ path: string; content: string; mtime_ms: number } | null>(
+          'app_check_file_modified',
+          {
+            path: tab.path,
+            knownMtimeMs: tab.lastMtimeMs || 0,
+          }
+        );
+        if (!res) continue;
+        tab.lastMtimeMs = res.mtime_ms;
+        const currentSerialized = serializeMarkdown(tab.mdModel);
+        if (res.content === tab.diskContent || res.content === currentSerialized) {
+          tab.diskContent = res.content;
+          continue;
+        }
+        // File was modified externally!
+        tab.diskContent = res.content;
+        if (!tab.dirty) {
+          tab.mdModel = parseMarkdown(res.content);
+          tab.conflictContent = null;
+          if (i === activeTabIndex) {
+            await loadTabIntoNvim(tab, nvimState.cursor_row, nvimState.cursor_col_char);
+          }
+        } else {
+          // Conflict: tab has unsaved local edits AND external file changed
+          const existing = autoSaveTimers.get(tab.id);
+          if (existing) {
+            clearTimeout(existing);
+            autoSaveTimers.delete(tab.id);
+          }
+          tab.conflictContent = res.content;
+        }
+      } catch (err) {
+        // Ignore transient stat/read errors
+      }
+    }
+  }
+
+  async function acceptExternalChanges() {
+    const tab = tabs[activeTabIndex];
+    if (!tab || tab.conflictContent == null) return;
+    const existing = autoSaveTimers.get(tab.id);
+    if (existing) {
+      clearTimeout(existing);
+      autoSaveTimers.delete(tab.id);
+    }
+    const newContent = tab.conflictContent;
+    tab.mdModel = parseMarkdown(newContent);
+    tab.diskContent = newContent;
+    tab.conflictContent = null;
+    tab.dirty = false;
+    await loadTabIntoNvim(tab, nvimState.cursor_row, nvimState.cursor_col_char);
+  }
+
+  async function keepLocalChanges() {
+    const tab = tabs[activeTabIndex];
+    if (!tab) return;
+    tab.conflictContent = null;
+    await saveFile();
   }
 
   const commandRegistry = createDefaultRegistry({
@@ -874,6 +950,27 @@
       console.warn('Failed to load user config.toml, using defaults:', err);
     }
 
+    // Check if files were passed via CLI arguments (e.g. `mdvim file.md`)
+    try {
+      const cliFiles = await invoke<Array<{ path: string; content: string; mtime_ms: number }>>('app_get_cli_files');
+      if (cliFiles && cliFiles.length > 0) {
+        tabs = cliFiles.map((f, idx) => ({
+          id: `tab-cli-${idx + 1}`,
+          title: f.path.split(/[/\\]/).pop() || `document-${idx + 1}.md`,
+          path: f.path,
+          viewMode: 'rendered',
+          mdModel: parseMarkdown(f.content),
+          dirty: false,
+          lastMtimeMs: f.mtime_ms,
+          diskContent: f.content,
+          conflictContent: null,
+        }));
+        activeTabIndex = 0;
+      }
+    } catch (err) {
+      console.warn('Failed to load CLI file args:', err);
+    }
+
     if (!tabs[0].path) {
       tabs[0].title = await getNextUntitledName(tabs[0].id);
     }
@@ -919,13 +1016,17 @@
       }
     });
 
-    // Setup window blur listener for auto-save
+    // Setup window blur listener for auto-save & focus listener for external file changes
     const onWindowBlur = () => {
       if (config.autoSaveOnBlur) {
         autoSaveAllDirtyTabs().catch((err) => console.error('Blur autosave error:', err));
       }
     };
+    const onWindowFocus = () => {
+      checkExternalFileChanges().catch((err) => console.error('Focus file watch error:', err));
+    };
     window.addEventListener('blur', onWindowBlur);
+    window.addEventListener('focus', onWindowFocus);
 
     // Setup periodic interval autosave (e.g. every 30s)
     let intervalTimer: ReturnType<typeof setInterval> | undefined;
@@ -935,10 +1036,17 @@
       }, config.autoSaveIntervalMs);
     }
 
+    // Setup periodic external file modification watcher (every 1.5s)
+    const watcherTimer = setInterval(() => {
+      checkExternalFileChanges().catch(() => {});
+    }, 1500);
+
     return () => {
       unlisten();
       window.removeEventListener('blur', onWindowBlur);
+      window.removeEventListener('focus', onWindowFocus);
       if (intervalTimer) clearInterval(intervalTimer);
+      clearInterval(watcherTimer);
       for (const t of autoSaveTimers.values()) {
         clearTimeout(t);
       }
@@ -1039,6 +1147,20 @@
       </button>
     </div>
   </header>
+
+  {#if activeTab.conflictContent != null}
+    <div class="conflict-banner">
+      <span>⚠ 외부에서 파일이 변경되었습니다 ({activeTab.title}).</span>
+      <div class="conflict-actions">
+        <button class="conflict-btn reload" onclick={acceptExternalChanges}>
+          디스크 내용으로 다시 불러오기
+        </button>
+        <button class="conflict-btn keep" onclick={keepLocalChanges}>
+          내 변경사항 유지 (덮어쓰기)
+        </button>
+      </div>
+    </div>
+  {/if}
 
   <div class="workspace {showInspector ? 'with-inspector' : ''}">
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -1394,5 +1516,36 @@
   }
   .preedit-badge {
     color: #c2410c;
+  }
+  .conflict-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: #fef3c7;
+    border-bottom: 1px solid #f59e0b;
+    color: #92400e;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .conflict-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .conflict-btn {
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid #d97706;
+  }
+  .conflict-btn.reload {
+    background: #d97706;
+    color: #ffffff;
+  }
+  .conflict-btn.keep {
+    background: #ffffff;
+    color: #92400e;
   }
 </style>

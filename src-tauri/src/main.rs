@@ -657,10 +657,20 @@ fn resolve_user_path(raw: &str) -> std::path::PathBuf {
     }
 }
 
+fn file_mtime_ms(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[derive(Serialize)]
 struct ReadFileResult {
     path: String,
     content: String,
+    mtime_ms: u64,
 }
 
 #[tauri::command]
@@ -668,10 +678,62 @@ async fn app_read_file(path: String) -> Result<ReadFileResult, String> {
     let resolved = resolve_user_path(&path);
     let content = std::fs::read_to_string(&resolved)
         .map_err(|e| format!("Failed to read file {:?}: {e}", resolved))?;
+    let mtime_ms = file_mtime_ms(&resolved);
     Ok(ReadFileResult {
         path: resolved.to_string_lossy().to_string(),
         content,
+        mtime_ms,
     })
+}
+
+#[tauri::command]
+async fn app_check_file_modified(
+    path: String,
+    known_mtime_ms: u64,
+) -> Result<Option<ReadFileResult>, String> {
+    let resolved = resolve_user_path(&path);
+    if !resolved.exists() {
+        return Ok(None);
+    }
+    let current_mtime = file_mtime_ms(&resolved);
+    if current_mtime == 0 || current_mtime == known_mtime_ms {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("Failed to read modified file {:?}: {e}", resolved))?;
+    Ok(Some(ReadFileResult {
+        path: resolved.to_string_lossy().to_string(),
+        content,
+        mtime_ms: current_mtime,
+    }))
+}
+
+#[tauri::command]
+async fn app_get_cli_files() -> Result<Vec<ReadFileResult>, String> {
+    let mut results = Vec::new();
+    for arg in std::env::args().skip(1) {
+        if arg.starts_with('-') {
+            continue;
+        }
+        let resolved = resolve_user_path(&arg);
+        if resolved.is_dir() {
+            continue;
+        }
+        let (content, mtime_ms) = if resolved.exists() {
+            (
+                std::fs::read_to_string(&resolved).unwrap_or_default(),
+                file_mtime_ms(&resolved),
+            )
+        } else {
+            (String::new(), 0)
+        };
+        results.push(ReadFileResult {
+            path: resolved.to_string_lossy().to_string(),
+            content,
+            mtime_ms,
+        });
+    }
+    Ok(results)
 }
 
 #[tauri::command]
@@ -919,7 +981,9 @@ fn main() {
             app_read_file,
             app_write_file,
             app_save_draft,
-            app_next_untitled_name
+            app_next_untitled_name,
+            app_check_file_modified,
+            app_get_cli_files
         ])
         .setup(move |app| {
             start_ipc_server(app.handle().clone(), rep_for_setup, pend_for_setup);
