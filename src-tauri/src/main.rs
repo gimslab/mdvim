@@ -628,6 +628,74 @@ async fn app_save_config(content: String) -> Result<String, String> {
         .map_err(|e| format!("Failed to write config file {:?}: {e}", path))
 }
 
+fn resolve_user_path(raw: &str) -> std::path::PathBuf {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    let p = std::path::PathBuf::from(trimmed);
+    if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(p)
+    }
+}
+
+#[derive(Serialize)]
+struct ReadFileResult {
+    path: String,
+    content: String,
+}
+
+#[tauri::command]
+async fn app_read_file(path: String) -> Result<ReadFileResult, String> {
+    let resolved = resolve_user_path(&path);
+    let content = std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("Failed to read file {:?}: {e}", resolved))?;
+    Ok(ReadFileResult {
+        path: resolved.to_string_lossy().to_string(),
+        content,
+    })
+}
+
+#[tauri::command]
+async fn app_write_file(path: String, content: String) -> Result<String, String> {
+    let resolved = resolve_user_path(&path);
+    if let Some(parent) = resolved.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&resolved, content)
+        .map(|_| resolved.to_string_lossy().to_string())
+        .map_err(|e| format!("Failed to write file {:?}: {e}", resolved))
+}
+
+#[tauri::command]
+async fn app_save_draft(name: String, content: String) -> Result<String, String> {
+    let base_dir = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+        .join("mdvim")
+        .join("drafts");
+    let _ = std::fs::create_dir_all(&base_dir);
+    let safe_name = name.replace(['/', '\\'], "_");
+    let target = base_dir.join(if safe_name.is_empty() {
+        "untitled.md".to_string()
+    } else {
+        safe_name
+    });
+    std::fs::write(&target, content)
+        .map(|_| target.to_string_lossy().to_string())
+        .map_err(|e| format!("Failed to write draft {:?}: {e}", target))
+}
+
 fn get_ipc_socket_path() -> std::path::PathBuf {
     #[cfg(unix)]
     {
@@ -786,7 +854,10 @@ fn main() {
             ctl_report_state,
             ctl_response,
             app_load_config,
-            app_save_config
+            app_save_config,
+            app_read_file,
+            app_write_file,
+            app_save_draft
         ])
         .setup(move |app| {
             start_ipc_server(app.handle().clone(), rep_for_setup, pend_for_setup);

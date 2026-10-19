@@ -3,7 +3,6 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { open, save } from '@tauri-apps/plugin-dialog';
-  import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
   import { defaultConfig, resolveShortcut, parseTomlConfig, type MdvimConfig } from './lib/config';
   import { t } from './lib/i18n';
   import {
@@ -324,7 +323,7 @@
   async function selectTab(idx: number) {
     if (idx < 0 || idx >= tabs.length || idx === activeTabIndex) return;
     const currentTab = tabs[activeTabIndex];
-    if (currentTab?.path && currentTab.dirty) {
+    if (currentTab?.dirty) {
       await autoSaveTab(currentTab);
     }
     activeTabIndex = idx;
@@ -345,7 +344,7 @@
 
   async function closeActiveTab(force = false) {
     const tabToClose = tabs[activeTabIndex];
-    if (!force && tabToClose?.path && tabToClose.dirty) {
+    if (!force && tabToClose?.dirty) {
       await autoSaveTab(tabToClose);
     }
     const timer = autoSaveTimers.get(tabToClose?.id);
@@ -380,7 +379,8 @@
       cmd.startsWith('write ') ||
       cmd.startsWith('write! ')
     ) {
-      await saveFile();
+      const argPath = cmd.replace(/^(?:write!?|w!?)\s*/, '').trim();
+      await saveFile(argPath || undefined);
     } else if (
       cmd === 'q!' ||
       cmd === 'quit!' ||
@@ -454,22 +454,28 @@
       cmd.startsWith('e ') ||
       cmd.startsWith('edit ')
     ) {
-      await openFile();
+      const argPath = cmd.replace(/^(?:edit!?|e!?)\s*/, '').trim();
+      await openFile(argPath || undefined);
     }
   }
 
-  async function openFile() {
+  async function openFile(targetPath?: string) {
     try {
-      const selected = await open({
-        multiple: false,
-        filters: [{ name: 'Markdown & Text', extensions: ['md', 'markdown', 'txt', 'text'] }],
-      });
-      if (!selected) return;
-      const filePath = typeof selected === 'string' ? selected : (selected as any).path;
+      let filePath = targetPath;
+      if (!filePath) {
+        const selected = await open({
+          multiple: false,
+          filters: [{ name: 'Markdown & Text', extensions: ['md', 'markdown', 'txt', 'text'] }],
+        });
+        if (!selected) return;
+        filePath = typeof selected === 'string' ? selected : (selected as any).path;
+      }
       if (!filePath) return;
 
-      const content = await readTextFile(filePath);
-      const fileName = filePath.split(/[/\\]/).pop() || 'document.md';
+      const res = await invoke<{ path: string; content: string }>('app_read_file', { path: filePath });
+      const resolvedPath = res.path;
+      const content = res.content;
+      const fileName = resolvedPath.split(/[/\\]/).pop() || 'document.md';
 
       // Check if current tab is an untouched untitled tab
       const current = tabs[activeTabIndex];
@@ -478,7 +484,7 @@
       const newDoc: TabDoc = {
         id: `tab-${Date.now()}`,
         title: fileName,
-        path: filePath,
+        path: resolvedPath,
         viewMode: current?.viewMode || 'rendered',
         mdModel: parseMarkdown(content),
         dirty: false,
@@ -507,10 +513,13 @@
       if (!filePath) return false;
 
       const markdown = serializeMarkdown(tab.mdModel);
-      await writeTextFile(filePath, markdown);
+      const resolvedPath = await invoke<string>('app_write_file', {
+        path: filePath,
+        content: markdown,
+      });
 
-      tab.path = filePath;
-      tab.title = filePath.split(/[/\\]/).pop() || tab.title;
+      tab.path = resolvedPath;
+      tab.title = resolvedPath.split(/[/\\]/).pop() || tab.title;
       tab.dirty = false;
       return true;
     } catch (err) {
@@ -522,14 +531,13 @@
   let autoSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   function scheduleDebouncedAutoSave(tab: TabDoc) {
-    if (!tab.path) return;
     const existingTimer = autoSaveTimers.get(tab.id);
     if (existingTimer) {
       clearTimeout(existingTimer);
     }
     const timer = setTimeout(async () => {
       autoSaveTimers.delete(tab.id);
-      if (tab.dirty && tab.path) {
+      if (tab.dirty) {
         await autoSaveTab(tab);
       }
     }, config.autoSaveDebounceMs || 1500);
@@ -537,7 +545,7 @@
   }
 
   async function autoSaveTab(tab: TabDoc): Promise<boolean> {
-    if (!tab.path || !tab.dirty) return false;
+    if (!tab.dirty) return false;
     const existing = autoSaveTimers.get(tab.id);
     if (existing) {
       clearTimeout(existing);
@@ -545,31 +553,47 @@
     }
     try {
       const markdown = serializeMarkdown(tab.mdModel);
-      await writeTextFile(tab.path, markdown);
+      if (tab.path) {
+        await invoke<string>('app_write_file', {
+          path: tab.path,
+          content: markdown,
+        });
+      } else {
+        await invoke<string>('app_save_draft', {
+          name: `${tab.id}-${tab.title}`,
+          content: markdown,
+        });
+      }
       tab.dirty = false;
       return true;
     } catch (err) {
-      console.error(`Autosave failed for ${tab.path}:`, err);
+      console.error(`Autosave failed for ${tab.path || tab.title}:`, err);
       return false;
     }
   }
 
   async function autoSaveAllDirtyTabs(): Promise<void> {
     for (const tab of tabs) {
-      if (tab.path && tab.dirty) {
+      if (tab.dirty) {
         await autoSaveTab(tab);
       }
     }
   }
 
-  async function saveFile(): Promise<boolean> {
+  async function saveFile(targetPath?: string): Promise<boolean> {
     const tab = tabs[activeTabIndex];
-    if (!tab.path) {
+    const destPath = targetPath || tab.path;
+    if (!destPath) {
       return await saveFileAs();
     }
     try {
       const markdown = serializeMarkdown(tab.mdModel);
-      await writeTextFile(tab.path, markdown);
+      const resolvedPath = await invoke<string>('app_write_file', {
+        path: destPath,
+        content: markdown,
+      });
+      tab.path = resolvedPath;
+      tab.title = resolvedPath.split(/[/\\]/).pop() || tab.title;
       tab.dirty = false;
       return true;
     } catch (err) {
@@ -948,14 +972,14 @@
     <div class="view-switcher">
       <button
         class="action-btn"
-        onclick={openFile}
+        onclick={() => openFile()}
         title="파일 열기 (Ctrl+O)"
       >
         📂 {msg.openFile}
       </button>
       <button
         class="action-btn"
-        onclick={saveFile}
+        onclick={() => saveFile()}
         title="파일 저장 (Ctrl+S)"
       >
         💾 {msg.saveFile}
