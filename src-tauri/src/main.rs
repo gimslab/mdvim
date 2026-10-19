@@ -685,15 +685,73 @@ async fn app_write_file(path: String, content: String) -> Result<String, String>
         .map_err(|e| format!("Failed to write file {:?}: {e}", resolved))
 }
 
-#[tauri::command]
-async fn app_save_draft(name: String, content: String) -> Result<String, String> {
-    let base_dir = get_launch_dir();
-    let safe_name = name.replace(['/', '\\'], "_");
-    let target = base_dir.join(if safe_name.is_empty() {
+fn find_unique_untitled_path(
+    base_dir: &std::path::Path,
+    desired_name: &str,
+    reserved_names: &[String],
+) -> std::path::PathBuf {
+    let safe_name = desired_name.replace(['/', '\\'], "_");
+    let initial = if safe_name.is_empty() {
         "untitled.md".to_string()
     } else {
         safe_name
-    });
+    };
+
+    let candidate_path = base_dir.join(&initial);
+    if !candidate_path.exists() && !reserved_names.iter().any(|r| r == &initial) {
+        return candidate_path;
+    }
+
+    let path_obj = std::path::Path::new(&initial);
+    let ext = path_obj
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("md");
+    let raw_stem = path_obj
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("untitled");
+
+    let base_stem = if let Some((prefix, suffix)) = raw_stem.rsplit_once('-') {
+        if !prefix.is_empty() && !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            prefix
+        } else {
+            raw_stem
+        }
+    } else {
+        raw_stem
+    };
+
+    let mut idx = 1u64;
+    loop {
+        let file_name = if ext.is_empty() {
+            format!("{}-{}", base_stem, idx)
+        } else {
+            format!("{}-{}.{}", base_stem, idx, ext)
+        };
+        let p = base_dir.join(&file_name);
+        if !p.exists() && !reserved_names.iter().any(|r| r == &file_name) {
+            return p;
+        }
+        idx += 1;
+    }
+}
+
+#[tauri::command]
+async fn app_next_untitled_name(reserved_names: Vec<String>) -> Result<String, String> {
+    let base_dir = get_launch_dir();
+    let target = find_unique_untitled_path(&base_dir, "untitled.md", &reserved_names);
+    Ok(target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("untitled.md")
+        .to_string())
+}
+
+#[tauri::command]
+async fn app_save_draft(name: String, content: String) -> Result<String, String> {
+    let base_dir = get_launch_dir();
+    let target = find_unique_untitled_path(&base_dir, &name, &[]);
     std::fs::write(&target, content)
         .map(|_| target.to_string_lossy().to_string())
         .map_err(|e| format!("Failed to write draft {:?}: {e}", target))
@@ -860,7 +918,8 @@ fn main() {
             app_save_config,
             app_read_file,
             app_write_file,
-            app_save_draft
+            app_save_draft,
+            app_next_untitled_name
         ])
         .setup(move |app| {
             start_ipc_server(app.handle().clone(), rep_for_setup, pend_for_setup);

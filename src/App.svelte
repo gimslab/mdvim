@@ -306,11 +306,23 @@
     tab.mdModel = [...tab.mdModel];
   }
 
+  async function getNextUntitledName(excludeTabId?: string): Promise<string> {
+    try {
+      const reservedNames = tabs
+        .filter((t) => t.id !== excludeTabId)
+        .map((t) => t.title);
+      return await invoke<string>('app_next_untitled_name', { reservedNames });
+    } catch {
+      return `untitled-${tabs.length + 1}.md`;
+    }
+  }
+
   async function addNewTab() {
     const idx = tabs.length + 1;
+    const nextTitle = await getNextUntitledName();
     tabs.push({
       id: `tab-${Date.now()}`,
-      title: `untitled-${idx}.md`,
+      title: nextTitle,
       path: null,
       viewMode: 'rendered',
       mdModel: parseMarkdown(`# 새 문서 ${idx}\n\n내용을 입력하세요.`),
@@ -355,7 +367,7 @@
 
     if (tabs.length <= 1) {
       // Don't close the last tab, reset it to a clean untitled document instead
-      tabs[0].title = 'untitled.md';
+      tabs[0].title = await getNextUntitledName(tabs[0].id);
       tabs[0].path = null;
       tabs[0].mdModel = parseMarkdown('');
       tabs[0].dirty = false;
@@ -564,6 +576,7 @@
           content: markdown,
         });
         tab.path = savedPath;
+        tab.title = savedPath.split(/[/\\]/).pop() || tab.title;
       }
       tab.dirty = false;
       return true;
@@ -583,13 +596,20 @@
 
   async function saveFile(targetPath?: string): Promise<boolean> {
     const tab = tabs[activeTabIndex];
-    const destPath = targetPath || tab.path || tab.title || 'untitled.md';
     try {
       const markdown = serializeMarkdown(tab.mdModel);
-      const resolvedPath = await invoke<string>('app_write_file', {
-        path: destPath,
-        content: markdown,
-      });
+      let resolvedPath: string;
+      if (targetPath || tab.path) {
+        resolvedPath = await invoke<string>('app_write_file', {
+          path: targetPath || tab.path,
+          content: markdown,
+        });
+      } else {
+        resolvedPath = await invoke<string>('app_save_draft', {
+          name: tab.title || 'untitled.md',
+          content: markdown,
+        });
+      }
       tab.path = resolvedPath;
       tab.title = resolvedPath.split(/[/\\]/).pop() || tab.title;
       tab.dirty = false;
@@ -854,6 +874,9 @@
       console.warn('Failed to load user config.toml, using defaults:', err);
     }
 
+    if (!tabs[0].path) {
+      tabs[0].title = await getNextUntitledName(tabs[0].id);
+    }
     await loadTabIntoNvim(tabs[0], 0, 0);
 
     // Listen for external IPC control requests (mdvim ctl)
