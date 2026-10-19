@@ -40,6 +40,81 @@ struct NvimState {
     cmdline: String,
     cmdpos: usize,
     last_yank: Option<YankEvent>,
+    ex_command: Option<String>,
+}
+
+fn is_app_ex_command(cmd: &str) -> bool {
+    let c = cmd.trim().trim_start_matches(':').trim();
+    matches!(
+        c,
+        "w" | "w!"
+            | "write"
+            | "write!"
+            | "q"
+            | "q!"
+            | "quit"
+            | "quit!"
+            | "qa"
+            | "qa!"
+            | "qall"
+            | "qall!"
+            | "wq"
+            | "wq!"
+            | "wqa"
+            | "wqa!"
+            | "x"
+            | "x!"
+            | "xa"
+            | "xa!"
+            | "xit"
+            | "xit!"
+            | "exit"
+            | "exit!"
+            | "bd"
+            | "bd!"
+            | "bdelete"
+            | "bdelete!"
+            | "bw"
+            | "bw!"
+            | "bwipeout"
+            | "bwipeout!"
+            | "tabc"
+            | "tabc!"
+            | "tabclose"
+            | "tabclose!"
+            | "close"
+            | "close!"
+            | "clo"
+            | "clo!"
+            | "cq"
+            | "cq!"
+            | "cquit"
+            | "cquit!"
+            | "e"
+            | "e!"
+            | "edit"
+            | "edit!"
+            | "enew"
+            | "enew!"
+            | "tabnew"
+            | "tabe"
+            | "tabedit"
+            | "bn"
+            | "bnext"
+            | "bp"
+            | "bprev"
+            | "bprevious"
+            | "tabn"
+            | "tabnext"
+            | "tabp"
+            | "tabprev"
+            | "tabprevious"
+    ) || c.starts_with("w ")
+        || c.starts_with("w! ")
+        || c.starts_with("write ")
+        || c.starts_with("write! ")
+        || c.starts_with("e ")
+        || c.starts_with("edit ")
 }
 
 impl NvimSession {
@@ -78,12 +153,27 @@ impl NvimSession {
                 "autocmd TextYankPost * let g:mdvim_last_yank = deepcopy(v:event) | let g:mdvim_last_yank_pos = [line(\"'[\"), col(\"'[\"), line(\"']\"), col(\"']\")]",
             )],
         )?;
+        session.call(
+            "nvim_command",
+            vec![Value::from(
+                "nnoremap <silent> ZZ :<C-u>let g:mdvim_ex_cmd = 'wq'<CR> | nnoremap <silent> ZQ :<C-u>let g:mdvim_ex_cmd = 'q!'<CR>",
+            )],
+        )?;
         session.set_lines(&initial_lines)?;
 
         Ok(session)
     }
 
+    fn ensure_alive(&mut self) -> Result<(), String> {
+        if let Ok(Some(_)) = self._child.try_wait() {
+            let lines = self.last_lines.clone();
+            *self = Self::new(lines)?;
+        }
+        Ok(())
+    }
+
     fn call(&mut self, method: &str, params: Vec<Value>) -> Result<Value, String> {
+        self.ensure_alive()?;
         let msgid = self.next_msgid;
         self.next_msgid += 1;
 
@@ -94,11 +184,28 @@ impl NvimSession {
             Value::Array(params),
         ]);
 
-        write_value(&mut self.stdin, &req).map_err(|e| format!("Write error: {e}"))?;
-        self.stdin.flush().map_err(|e| format!("Flush error: {e}"))?;
+        if let Err(e) = write_value(&mut self.stdin, &req)
+            .map_err(|e| e.to_string())
+            .and_then(|_| self.stdin.flush().map_err(|e| e.to_string()))
+        {
+            let lines = self.last_lines.clone();
+            if let Ok(new_sess) = Self::new(lines) {
+                *self = new_sess;
+            }
+            return Err(format!("Write/Flush error (session respawned): {e}"));
+        }
 
         loop {
-            let msg = read_value(&mut self.stdout).map_err(|e| format!("Read error: {e}"))?;
+            let msg = match read_value(&mut self.stdout) {
+                Ok(m) => m,
+                Err(e) => {
+                    let lines = self.last_lines.clone();
+                    if let Ok(new_sess) = Self::new(lines) {
+                        *self = new_sess;
+                    }
+                    return Err(format!("Read error (session respawned): {e}"));
+                }
+            };
             if let Value::Array(arr) = msg {
                 if arr.len() >= 4 && arr[0].as_u64() == Some(1) && arr[1].as_u64() == Some(msgid) {
                     if !arr[2].is_nil() {
@@ -151,6 +258,7 @@ impl NvimSession {
                 cmdline: String::new(),
                 cmdpos: 0,
                 last_yank: None,
+                ex_command: None,
             });
         }
 
@@ -202,6 +310,19 @@ impl NvimSession {
         self.last_cursor_row = cursor_row;
         self.last_cursor_col_byte = cursor_col_byte;
         self.last_cursor_col_char = cursor_col_char;
+
+        // Check if ZZ / ZQ recorded an Ex command
+        let mut ex_command: Option<String> = None;
+        if let Ok(ex_val) = self.call(
+            "nvim_eval",
+            vec![Value::from("exists('g:mdvim_ex_cmd') ? g:mdvim_ex_cmd : ''")],
+        ) {
+            let s = ex_val.as_str().unwrap_or("").trim().to_string();
+            if !s.is_empty() {
+                let _ = self.call("nvim_command", vec![Value::from("unlet! g:mdvim_ex_cmd")]);
+                ex_command = Some(s);
+            }
+        }
 
         // Check if TextYankPost recorded any yank event
         let yank_val = self.call(
@@ -279,6 +400,7 @@ impl NvimSession {
             cmdline,
             cmdpos,
             last_yank,
+            ex_command,
         })
     }
 }
@@ -294,6 +416,55 @@ async fn nvim_get_state(state: tauri::State<'_, AppState>) -> Result<NvimState, 
 #[tauri::command]
 async fn nvim_input(keys: String, state: tauri::State<'_, AppState>) -> Result<NvimState, String> {
     let mut s = state.0.lock().map_err(|e| e.to_string())?;
+
+    // Check if a compound Ex command string was sent at once (e.g. ":q!<CR>")
+    if keys.starts_with(':') && (keys.ends_with("<CR>") || keys.ends_with("<NL>")) {
+        let inner = keys
+            .trim_end_matches("<CR>")
+            .trim_end_matches("<NL>")
+            .trim_start_matches(':')
+            .trim();
+        if is_app_ex_command(inner) {
+            let _ = s.call("nvim_input", vec![Value::from("<C-\\><C-n>")]);
+            let mut st = s.get_state()?;
+            st.ex_command = Some(inner.to_string());
+            return Ok(st);
+        }
+    }
+
+    // Check if Enter (<CR>) is pressed while in Command-line mode ('c')
+    if keys == "<CR>" || keys == "<NL>" || keys == "\r" || keys == "\n" {
+        if let Ok(Value::Map(map)) = s.call("nvim_get_mode", vec![]) {
+            let mut in_cmd_mode = false;
+            for (k, v) in map {
+                if k.as_str() == Some("mode") && v.as_str() == Some("c") {
+                    in_cmd_mode = true;
+                }
+            }
+            if in_cmd_mode {
+                if let Ok(val) = s.call(
+                    "nvim_call_function",
+                    vec![Value::from("getcmdline"), Value::Array(vec![])],
+                ) {
+                    let cmd = val
+                        .as_str()
+                        .unwrap_or("")
+                        .trim()
+                        .trim_start_matches(':')
+                        .trim()
+                        .to_string();
+                    if is_app_ex_command(&cmd) {
+                        // Cancel Neovim's command-line mode without executing `:q!` / `:q` / `:w` in headless Neovim
+                        let _ = s.call("nvim_input", vec![Value::from("<C-\\><C-n>")]);
+                        let mut st = s.get_state()?;
+                        st.ex_command = Some(cmd);
+                        return Ok(st);
+                    }
+                }
+            }
+        }
+    }
+
     s.call("nvim_input", vec![Value::from(keys.as_str())])?;
     s.get_state()
 }

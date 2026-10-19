@@ -42,6 +42,7 @@
     cmdline?: string;
     cmdpos?: number;
     last_yank?: YankEvent | null;
+    ex_command?: string | null;
   }
 
   interface TabDoc {
@@ -228,6 +229,10 @@
     }
 
     nvimState = state;
+
+    if (state.ex_command) {
+      await executeExCommand(state.ex_command);
+    }
   }
 
   function sendNvimKeys(keys: string) {
@@ -338,9 +343,9 @@
     await selectTab(prevIdx);
   }
 
-  async function closeActiveTab() {
+  async function closeActiveTab(force = false) {
     const tabToClose = tabs[activeTabIndex];
-    if (tabToClose?.path && tabToClose.dirty) {
+    if (!force && tabToClose?.path && tabToClose.dirty) {
       await autoSaveTab(tabToClose);
     }
     const timer = autoSaveTimers.get(tabToClose?.id);
@@ -350,10 +355,10 @@
     }
 
     if (tabs.length <= 1) {
-      // Don't close the last tab, reset it instead
+      // Don't close the last tab, reset it to a clean untitled document instead
       tabs[0].title = 'untitled.md';
       tabs[0].path = null;
-      tabs[0].mdModel = parseMarkdown('# mdvim 에디터\n\n');
+      tabs[0].mdModel = parseMarkdown('');
       tabs[0].dirty = false;
       await loadTabIntoNvim(tabs[0], 0, 0);
       return;
@@ -361,6 +366,96 @@
     tabs.splice(activeTabIndex, 1);
     activeTabIndex = Math.min(activeTabIndex, tabs.length - 1);
     await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
+  }
+
+  async function executeExCommand(rawCmd: string) {
+    const cmd = rawCmd.trim().replace(/^:+/, '').trim();
+    if (
+      cmd === 'w' ||
+      cmd === 'w!' ||
+      cmd === 'write' ||
+      cmd === 'write!' ||
+      cmd.startsWith('w ') ||
+      cmd.startsWith('w! ') ||
+      cmd.startsWith('write ') ||
+      cmd.startsWith('write! ')
+    ) {
+      await saveFile();
+    } else if (
+      cmd === 'q!' ||
+      cmd === 'quit!' ||
+      cmd === 'bd!' ||
+      cmd === 'bdelete!' ||
+      cmd === 'bw!' ||
+      cmd === 'bwipeout!' ||
+      cmd === 'tabc!' ||
+      cmd === 'tabclose!' ||
+      cmd === 'close!' ||
+      cmd === 'clo!' ||
+      cmd === 'qa!' ||
+      cmd === 'qall!' ||
+      cmd === 'cq' ||
+      cmd === 'cq!' ||
+      cmd === 'cquit' ||
+      cmd === 'cquit!'
+    ) {
+      await closeActiveTab(true);
+    } else if (
+      cmd === 'q' ||
+      cmd === 'quit' ||
+      cmd === 'bd' ||
+      cmd === 'bdelete' ||
+      cmd === 'bw' ||
+      cmd === 'bwipeout' ||
+      cmd === 'tabc' ||
+      cmd === 'tabclose' ||
+      cmd === 'close' ||
+      cmd === 'clo' ||
+      cmd === 'qa' ||
+      cmd === 'qall'
+    ) {
+      await closeActiveTab(false);
+    } else if (
+      cmd === 'wq' ||
+      cmd === 'wq!' ||
+      cmd === 'wqa' ||
+      cmd === 'wqa!' ||
+      cmd === 'x' ||
+      cmd === 'x!' ||
+      cmd === 'xa' ||
+      cmd === 'xa!' ||
+      cmd === 'xit' ||
+      cmd === 'xit!' ||
+      cmd === 'exit' ||
+      cmd === 'exit!'
+    ) {
+      const ok = await saveFile();
+      if (ok || cmd.endsWith('!')) {
+        await closeActiveTab(true);
+      }
+    } else if (cmd === 'tabnew' || cmd === 'tabe' || cmd === 'tabedit' || cmd === 'enew' || cmd === 'enew!') {
+      await addNewTab();
+    } else if (cmd === 'bn' || cmd === 'bnext' || cmd === 'tabn' || cmd === 'tabnext') {
+      await nextTab();
+    } else if (
+      cmd === 'bp' ||
+      cmd === 'bprev' ||
+      cmd === 'bprevious' ||
+      cmd === 'tabp' ||
+      cmd === 'tabprev' ||
+      cmd === 'tabprevious'
+    ) {
+      await prevTab();
+    } else if (
+      cmd === 'e' ||
+      cmd === 'edit' ||
+      cmd === 'e!' ||
+      cmd === 'edit!' ||
+      cmd.startsWith('e ') ||
+      cmd.startsWith('edit ')
+    ) {
+      await openFile();
+    }
   }
 
   async function openFile() {
@@ -604,27 +699,6 @@
         commandRegistry.execute(target, commandContext).catch((err) => {
           console.error(`Failed to execute shortcut command ${target}:`, err);
         });
-        return;
-      }
-    }
-
-    // If in command-line mode (e.g. user typed ':') and presses Enter, check command
-    if (nvimState.mode === 'c' && (e.key === 'Enter' || e.code === 'Enter')) {
-      const cmd = (nvimState.cmdline || '').trim();
-      if (cmd === 'w' || cmd.startsWith('w ')) {
-        e.preventDefault();
-        sendNvimKeys('<CR>');
-        saveFile().catch((err) => console.error('Save failed:', err));
-        return;
-      } else if (cmd === 'q') {
-        e.preventDefault();
-        sendNvimKeys('<CR>');
-        closeActiveTab().catch((err) => console.error('Close tab failed:', err));
-        return;
-      } else if (cmd === 'wq') {
-        e.preventDefault();
-        sendNvimKeys('<CR>');
-        saveFile().then(() => closeActiveTab()).catch((err) => console.error('Save & close failed:', err));
         return;
       }
     }
