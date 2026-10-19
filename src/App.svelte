@@ -224,6 +224,7 @@
     // If buffer content changed, mark tab as dirty (unsaved)
     if (state.lines.join('\n') !== nvimState.lines.join('\n')) {
       tab.dirty = true;
+      scheduleDebouncedAutoSave(tab);
     }
 
     nvimState = state;
@@ -266,6 +267,8 @@
       row.chars[k][styleKey] = targetState;
     }
     row.dirty = true;
+    tab.dirty = true;
+    scheduleDebouncedAutoSave(tab);
     tab.mdModel = [...tab.mdModel];
   }
 
@@ -288,9 +291,13 @@
     if (/^\s*[-*+] \[ \] $/.test(line.prefix)) {
       line.prefix = line.prefix.replace('[ ]', '[x]');
       line.dirty = true;
+      tab.dirty = true;
+      scheduleDebouncedAutoSave(tab);
     } else if (/^\s*[-*+] \[[xX]\] $/.test(line.prefix)) {
       line.prefix = line.prefix.replace(/\[[xX]\]/, '[ ]');
       line.dirty = true;
+      tab.dirty = true;
+      scheduleDebouncedAutoSave(tab);
     }
     tab.mdModel = [...tab.mdModel];
   }
@@ -311,6 +318,10 @@
 
   async function selectTab(idx: number) {
     if (idx < 0 || idx >= tabs.length || idx === activeTabIndex) return;
+    const currentTab = tabs[activeTabIndex];
+    if (currentTab?.path && currentTab.dirty) {
+      await autoSaveTab(currentTab);
+    }
     activeTabIndex = idx;
     await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
   }
@@ -328,6 +339,16 @@
   }
 
   async function closeActiveTab() {
+    const tabToClose = tabs[activeTabIndex];
+    if (tabToClose?.path && tabToClose.dirty) {
+      await autoSaveTab(tabToClose);
+    }
+    const timer = autoSaveTimers.get(tabToClose?.id);
+    if (timer) {
+      clearTimeout(timer);
+      autoSaveTimers.delete(tabToClose.id);
+    }
+
     if (tabs.length <= 1) {
       // Don't close the last tab, reset it instead
       tabs[0].title = 'untitled.md';
@@ -400,6 +421,49 @@
     } catch (err) {
       console.error('Failed to save file as:', err);
       return false;
+    }
+  }
+
+  let autoSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function scheduleDebouncedAutoSave(tab: TabDoc) {
+    if (!tab.path) return;
+    const existingTimer = autoSaveTimers.get(tab.id);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+    const timer = setTimeout(async () => {
+      autoSaveTimers.delete(tab.id);
+      if (tab.dirty && tab.path) {
+        await autoSaveTab(tab);
+      }
+    }, config.autoSaveDebounceMs || 1500);
+    autoSaveTimers.set(tab.id, timer);
+  }
+
+  async function autoSaveTab(tab: TabDoc): Promise<boolean> {
+    if (!tab.path || !tab.dirty) return false;
+    const existing = autoSaveTimers.get(tab.id);
+    if (existing) {
+      clearTimeout(existing);
+      autoSaveTimers.delete(tab.id);
+    }
+    try {
+      const markdown = serializeMarkdown(tab.mdModel);
+      await writeTextFile(tab.path, markdown);
+      tab.dirty = false;
+      return true;
+    } catch (err) {
+      console.error(`Autosave failed for ${tab.path}:`, err);
+      return false;
+    }
+  }
+
+  async function autoSaveAllDirtyTabs(): Promise<void> {
+    for (const tab of tabs) {
+      if (tab.path && tab.dirty) {
+        await autoSaveTab(tab);
+      }
     }
   }
 
@@ -736,8 +800,30 @@
       }
     });
 
+    // Setup window blur listener for auto-save
+    const onWindowBlur = () => {
+      if (config.autoSaveOnBlur) {
+        autoSaveAllDirtyTabs().catch((err) => console.error('Blur autosave error:', err));
+      }
+    };
+    window.addEventListener('blur', onWindowBlur);
+
+    // Setup periodic interval autosave (e.g. every 30s)
+    let intervalTimer: ReturnType<typeof setInterval> | undefined;
+    if (config.autoSaveIntervalMs && config.autoSaveIntervalMs > 0) {
+      intervalTimer = setInterval(() => {
+        autoSaveAllDirtyTabs().catch((err) => console.error('Interval autosave error:', err));
+      }, config.autoSaveIntervalMs);
+    }
+
     return () => {
       unlisten();
+      window.removeEventListener('blur', onWindowBlur);
+      if (intervalTimer) clearInterval(intervalTimer);
+      for (const t of autoSaveTimers.values()) {
+        clearTimeout(t);
+      }
+      autoSaveTimers.clear();
     };
   });
 
