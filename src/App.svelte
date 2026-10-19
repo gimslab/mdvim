@@ -3,11 +3,19 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { open, save } from '@tauri-apps/plugin-dialog';
-  import { defaultConfig, resolveShortcut, parseTomlConfig, type MdvimConfig } from './lib/config';
+  import {
+    defaultConfig,
+    resolveShortcut,
+    parseTomlConfig,
+    mergeShortcutRules,
+    type MdvimConfig,
+  } from './lib/config';
   import { t } from './lib/i18n';
   import {
+    parseLine,
     parseMarkdown,
     projectLines,
+    serializeLine,
     serializeMarkdown,
     extractMarkdownRange,
     applyProjected,
@@ -296,22 +304,50 @@
     toggleSpanStyleUnderCursor('code');
   }
 
-  function toggleCheckboxOnLine(rowIdx: number) {
+  async function toggleCheckboxOnLine(rowIdx: number) {
     const tab = tabs[activeTabIndex];
-    const line = tab.mdModel[rowIdx];
+    let line = tab.mdModel[rowIdx];
     if (!line) return;
+
+    let bufferNeedsSync = tab.viewMode === 'code';
+    let newCursorCol = nvimState.cursor_col_char;
+
+    // If the user typed `- [ ] ...` in rendered mode and pressed Ctrl+L before leaving the line,
+    // reparse the line first so the prefix is extracted properly.
+    if (!/^\s*[-*+] \[[ xX]\] $/.test(line.prefix)) {
+      const reparsed = parseLine(serializeLine(line));
+      if (reparsed.prefix !== line.prefix) {
+        const oldLen = line.chars.length;
+        const newLen = reparsed.chars.length;
+        if (rowIdx === nvimState.cursor_row && oldLen > newLen) {
+          newCursorCol = Math.max(0, newCursorCol - (oldLen - newLen));
+        }
+        line = reparsed;
+        tab.mdModel[rowIdx] = line;
+        bufferNeedsSync = true;
+      }
+    }
+
     if (/^\s*[-*+] \[ \] $/.test(line.prefix)) {
       line.prefix = line.prefix.replace('[ ]', '[x]');
-      line.dirty = true;
-      tab.dirty = true;
-      scheduleDebouncedAutoSave(tab);
     } else if (/^\s*[-*+] \[[xX]\] $/.test(line.prefix)) {
       line.prefix = line.prefix.replace(/\[[xX]\]/, '[ ]');
-      line.dirty = true;
-      tab.dirty = true;
-      scheduleDebouncedAutoSave(tab);
+    } else if (/^\s*[-*+] $/.test(line.prefix)) {
+      line.prefix = line.prefix.replace(/([-*+]) $/, '$1 [ ] ');
+    } else if (line.prefix === '') {
+      line.prefix = '- [ ] ';
+    } else {
+      return;
     }
+
+    line.dirty = true;
+    tab.dirty = true;
+    scheduleDebouncedAutoSave(tab);
     tab.mdModel = [...tab.mdModel];
+
+    if (bufferNeedsSync) {
+      await loadTabIntoNvim(tab, nvimState.cursor_row, newCursorCol);
+    }
   }
 
   async function getNextUntitledName(excludeTabId?: string): Promise<string> {
@@ -974,7 +1010,7 @@
         config = {
           ...defaultConfig,
           ...parsed,
-          shortcuts: parsed.shortcuts && parsed.shortcuts.length > 0 ? parsed.shortcuts : defaultConfig.shortcuts,
+          shortcuts: mergeShortcutRules(defaultConfig.shortcuts, parsed.shortcuts),
         };
       }
     } catch (err) {

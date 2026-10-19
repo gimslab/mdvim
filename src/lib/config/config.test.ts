@@ -4,6 +4,7 @@ import {
   parseTomlConfig,
   serializeTomlConfig,
   resolveShortcut,
+  mergeShortcutRules,
   type MdvimConfig,
 } from './index';
 
@@ -23,36 +24,37 @@ describe('mdvim configuration system', () => {
     expect(resolveShortcut(defaultConfig, 'Shift+Ctrl+P', 'n')).toBe('palette.open');
   });
 
-  it('parses custom shortcuts from TOML string', () => {
+  it('parses custom shortcuts from TOML string and merges with defaults', () => {
     const toml = `
 [general]
 locale = "en"
 theme = "dark"
 
 [shortcuts.always]
-"Ctrl+Shift+P" = "palette.open"
 "Ctrl+K" = "editor.toggleInspector"
 
 [shortcuts.normal]
 "Ctrl+D" = "nvim"
 
 [shortcuts.insert]
-"Ctrl+B" = "format.toggleBold"
 "Ctrl+U" = "format.toggleCode"
 `;
 
     const parsed = parseTomlConfig(toml);
     expect(parsed.locale).toBe('en');
     expect(parsed.theme).toBe('dark');
-    expect(parsed.shortcuts?.length).toBe(5);
+    expect(parsed.shortcuts?.length).toBe(3);
 
     const merged: MdvimConfig = {
       ...defaultConfig,
       ...parsed,
-      shortcuts: parsed.shortcuts ?? defaultConfig.shortcuts,
+      shortcuts: mergeShortcutRules(defaultConfig.shortcuts, parsed.shortcuts),
     };
 
     expect(resolveShortcut(merged, 'Ctrl+K', 'n')).toBe('editor.toggleInspector');
+    expect(resolveShortcut(merged, 'Ctrl+L', 'n')).toBe('format.toggleCheckbox');
+    expect(resolveShortcut(merged, 'Ctrl+L', 'i')).toBe('format.toggleCheckbox');
+    expect(resolveShortcut(merged, 'Ctrl+D', 'i')).toBe('format.toggleStrikethrough');
     expect(resolveShortcut(merged, 'Ctrl+U', 'i')).toBe('format.toggleCode');
     expect(resolveShortcut(merged, 'Ctrl+U', 'n')).toBe(null);
   });
@@ -69,3 +71,4 @@ theme = "dark"
     expect(parsed.shortcuts?.length).toBe(defaultConfig.shortcuts.length);
   });
 });
+

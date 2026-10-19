@@ -184,3 +184,27 @@ export function resolveShortcut(
 
   return globalRule ? globalRule.command : null;
 }
+
+export function mergeShortcutRules(
+  defaults: ShortcutRule[],
+  overrides?: ShortcutRule[]
+): ShortcutRule[] {
+  if (!overrides || overrides.length === 0) {
+    return [...defaults];
+  }
+  const merged = [...defaults];
+  for (const ov of overrides) {
+    const normKey = normalizeKey(ov.key);
+    const when = ov.when || 'always';
+    const existingIdx = merged.findIndex(
+      (d) => normalizeKey(d.key) === normKey && (d.when || 'always') === when
+    );
+    if (existingIdx >= 0) {
+      merged[existingIdx] = { ...ov, when };
+    } else {
+      merged.push({ ...ov, when });
+    }
+  }
+  return merged;
+}
+
