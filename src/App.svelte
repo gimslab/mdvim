@@ -559,10 +559,11 @@
           content: markdown,
         });
       } else {
-        await invoke<string>('app_save_draft', {
-          name: `${tab.id}-${tab.title}`,
+        const savedPath = await invoke<string>('app_save_draft', {
+          name: tab.title || 'untitled.md',
           content: markdown,
         });
+        tab.path = savedPath;
       }
       tab.dirty = false;
       return true;
@@ -582,10 +583,7 @@
 
   async function saveFile(targetPath?: string): Promise<boolean> {
     const tab = tabs[activeTabIndex];
-    const destPath = targetPath || tab.path;
-    if (!destPath) {
-      return await saveFileAs();
-    }
+    const destPath = targetPath || tab.path || tab.title || 'untitled.md';
     try {
       const markdown = serializeMarkdown(tab.mdModel);
       const resolvedPath = await invoke<string>('app_write_file', {

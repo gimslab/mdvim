@@ -19,3 +19,4 @@ src-tauri/gen/
 *.swo
 .DS_Store
 Thumbs.db
+untitled*.md

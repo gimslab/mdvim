@@ -628,6 +628,20 @@ async fn app_save_config(content: String) -> Result<String, String> {
         .map_err(|e| format!("Failed to write config file {:?}: {e}", path))
 }
 
+fn get_launch_dir() -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // When running via `npm run tauri dev`, Cargo runs inside `src-tauri/`,
+    // so step up to the workspace root where the user invoked the command.
+    if cwd.file_name().and_then(|n| n.to_str()) == Some("src-tauri") {
+        if let Some(parent) = cwd.parent() {
+            if parent.join("package.json").exists() {
+                return parent.to_path_buf();
+            }
+        }
+    }
+    cwd
+}
+
 fn resolve_user_path(raw: &str) -> std::path::PathBuf {
     let trimmed = raw.trim();
     if let Some(rest) = trimmed.strip_prefix("~/") {
@@ -639,9 +653,7 @@ fn resolve_user_path(raw: &str) -> std::path::PathBuf {
     if p.is_absolute() {
         p
     } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(p)
+        get_launch_dir().join(p)
     }
 }
 
@@ -675,16 +687,7 @@ async fn app_write_file(path: String, content: String) -> Result<String, String>
 
 #[tauri::command]
 async fn app_save_draft(name: String, content: String) -> Result<String, String> {
-    let base_dir = std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
-        })
-        .unwrap_or_else(std::env::temp_dir)
-        .join("mdvim")
-        .join("drafts");
-    let _ = std::fs::create_dir_all(&base_dir);
+    let base_dir = get_launch_dir();
     let safe_name = name.replace(['/', '\\'], "_");
     let target = base_dir.join(if safe_name.is_empty() {
         "untitled.md".to_string()
