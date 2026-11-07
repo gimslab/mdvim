@@ -72,3 +72,11 @@ theme = "dark"
   });
 });
 
+
+describe('default shortcuts', () => {
+  it('maps Ctrl+M to edit.revealLine in every mode', () => {
+    for (const mode of ['n', 'i', 'v']) {
+      expect(resolveShortcut(defaultConfig, 'Ctrl+M', mode)).toBe('edit.revealLine');
+    }
+  });
+});

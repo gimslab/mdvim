@@ -1007,6 +1007,22 @@ fn start_ipc_server(
     });
 }
 
+/// Opens an http(s)/mailto URL in the system default handler.
+#[tauri::command]
+fn app_open_url(url: String) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")) {
+        return Err("지원하지 않는 URL 스킴입니다 (http/https/mailto만 허용)".into());
+    }
+    #[cfg(target_os = "windows")]
+    let res = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn();
+    #[cfg(target_os = "macos")]
+    let res = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let res = std::process::Command::new("xdg-open").arg(&url).spawn();
+    res.map(|_| ()).map_err(|e| e.to_string())
+}
+
 fn main() {
     let initial = vec![String::new()];
     let session = NvimSession::new(initial).expect("Failed to start embedded Neovim");
@@ -1039,7 +1055,8 @@ fn main() {
             app_next_untitled_name,
             app_check_file_modified,
             app_get_cli_files,
-            app_get_recent_files
+            app_get_recent_files,
+            app_open_url
         ])
         .setup(move |app| {
             start_ipc_server(app.handle().clone(), rep_for_setup, pend_for_setup);

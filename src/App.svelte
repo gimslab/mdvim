@@ -21,6 +21,9 @@
     applyProjected,
     reparseCompletedLines,
     isHorizontalRulePrefix,
+    revealLine,
+    renderedColToRawCol,
+    rawColToRenderedCol,
     type ProjectedLine,
     type StyledChar,
   } from './lib/projection';
@@ -68,12 +71,14 @@
     text: string;
     cls: string;
     isPreedit?: boolean;
+    href?: string;
   }
 
   let config = $state({ ...defaultConfig });
   let msg = $derived(t(config.locale));
   let showInspector = $state(true);
   let showCommandPalette = $state(false);
+  let linkDialog = $state<{ row: number; start: number; end: number; text: string; url: string } | null>(null);
 
   let tabs = $state<TabDoc[]>([
     {
@@ -132,13 +137,13 @@
 
     const segments: RenderSegment[] = [];
 
-    function pushSeg(text: string, cls: string, isPreedit = false) {
+    function pushSeg(text: string, cls: string, isPreedit = false, href?: string) {
       if (!text) return;
       const last = segments[segments.length - 1];
-      if (last && !last.isPreedit && !isPreedit && last.cls === cls) {
+      if (last && !last.isPreedit && !isPreedit && last.cls === cls && last.href === href) {
         last.text += text;
       } else {
-        segments.push({ text, cls, isPreedit });
+        segments.push({ text, cls, isPreedit, href });
       }
     }
 
@@ -156,8 +161,10 @@
         if (mc?.i) classes.push('italic-run');
         if (mc?.s) classes.push('strike-run');
         if (mc?.code) classes.push('code-run');
+        if (mc?.href) classes.push('link-run');
+        if (activeTab.mdModel[rowIdx]?.revealed) classes.push('raw-run');
         if (isCursor) classes.push(isInsert ? 'cursor-bar' : 'cursor-block');
-        pushSeg(chars[colIdx], classes.join(' '));
+        pushSeg(chars[colIdx], classes.join(' '), false, mc?.href);
       } else if (isCursor) {
         pushSeg('\u00A0', isInsert ? 'cursor-bar' : 'cursor-block');
       }
@@ -286,6 +293,111 @@
     tab.dirty = true;
     scheduleDebouncedAutoSave(tab);
     tab.mdModel = [...tab.mdModel];
+  }
+
+  function handleSegmentClick(e: MouseEvent, href?: string) {
+    if (!href || !(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    invoke('app_open_url', { url: href }).catch((err) => console.error('open url failed:', err));
+  }
+
+  function openLinkDialog() {
+    const tab = tabs[activeTabIndex];
+    if (tab.viewMode !== 'rendered') return;
+    const row = tab.mdModel[nvimState.cursor_row];
+    if (!row) return;
+    const col = Math.min(nvimState.cursor_col_char, Math.max(0, row.chars.length - 1));
+    let s = col;
+    let end = col;
+    const cur = row.chars[col];
+    if (cur?.href) {
+      while (s > 0 && row.chars[s - 1].href === cur.href) s--;
+      end = col + 1;
+      while (end < row.chars.length && row.chars[end].href === cur.href) end++;
+    } else if (cur && cur.c !== ' ') {
+      while (s > 0 && row.chars[s - 1].c !== ' ') s--;
+      end = col + 1;
+      while (end < row.chars.length && row.chars[end].c !== ' ') end++;
+    } else {
+      s = end = Math.min(nvimState.cursor_col_char, row.chars.length);
+    }
+    linkDialog = {
+      row: nvimState.cursor_row,
+      start: s,
+      end,
+      text: row.chars.slice(s, end).map((x) => x.c).join(''),
+      url: cur?.href ?? '',
+    };
+  }
+
+  function closeLinkDialog() {
+    linkDialog = null;
+    setTimeout(() => imeInputEl?.focus(), 50);
+  }
+
+  async function applyLinkDialog() {
+    const d = linkDialog;
+    if (!d) return;
+    const tab = tabs[activeTabIndex];
+    const row = tab.mdModel[d.row];
+    if (!row) return closeLinkDialog();
+    const url = d.url.trim();
+    const text = d.text.length ? d.text : url;
+    const chars: StyledChar[] = Array.from(text).map((c) => ({
+      c, b: false, i: false, s: false, code: false, ...(url ? { href: url } : {}),
+    }));
+    row.chars.splice(d.start, d.end - d.start, ...chars);
+    row.dirty = true;
+    tab.dirty = true;
+    scheduleDebouncedAutoSave(tab);
+    tab.mdModel = [...tab.mdModel];
+    linkDialog = null;
+    await loadTabIntoNvim(tab, d.row, Math.min(d.start, Math.max(0, chars.length ? d.start + chars.length - 1 : d.start)));
+  }
+
+  /** Toggles the current line between rendered and raw markdown source (rendered view only). */
+  function toggleRevealLine() {
+    const tab = tabs[activeTabIndex];
+    if (tab.viewMode !== 'rendered') return Promise.resolve();
+    return enqueueRpc(async () => {
+      const rowIdx = nvimState.cursor_row;
+      const row = tab.mdModel[rowIdx];
+      if (!row) return;
+      let newRow: ProjectedLine;
+      let newCol: number;
+      if (row.revealed) {
+        newRow = parseLine(serializeLine(row));
+        newCol = rawColToRenderedCol(row.chars.map((x) => x.c).join(''), nvimState.cursor_col_char);
+      } else {
+        newRow = revealLine(row);
+        newCol = renderedColToRawCol(row, nvimState.cursor_col_char);
+      }
+      const model = [...tab.mdModel];
+      model[rowIdx] = newRow;
+      tab.mdModel = model;
+      nvimState = await invoke<NvimState>('nvim_set_buffer', {
+        lines: projectLines(model),
+        cursorRow: rowIdx,
+        cursorColChar: newCol,
+      });
+      imeInputEl?.focus();
+    });
+  }
+
+  /**
+   * Ctrl+M: in Insert mode just toggles raw source for the current line.
+   * Outside Insert mode it first reveals the raw line (if not already) and then enters Insert mode.
+   */
+  async function revealLineCommand() {
+    const tab = tabs[activeTabIndex];
+    if (tab.viewMode !== 'rendered') return;
+    if (nvimState.mode.startsWith('i')) {
+      await toggleRevealLine();
+      return;
+    }
+    if (/^[vV\x16]/.test(nvimState.mode)) await sendNvimKeys('<Esc>');
+    if (!tabs[activeTabIndex].mdModel[nvimState.cursor_row]?.revealed) await toggleRevealLine();
+    await sendNvimKeys('i');
   }
 
   function toggleBoldUnderCursor() {
@@ -748,6 +860,8 @@
     toggleItalic: () => toggleItalicUnderCursor(),
     toggleStrikethrough: () => toggleStrikethroughUnderCursor(),
     toggleCode: () => toggleCodeUnderCursor(),
+    editLink: () => openLinkDialog(),
+    revealLine: () => revealLineCommand(),
     toggleCheckbox: () => toggleCheckboxOnLine(nvimState.cursor_row),
     newTab: () => addNewTab(),
     nextTab: () => nextTab(),
@@ -855,7 +969,7 @@
   }
 
   function handleKeyDown(e: KeyboardEvent) {
-    if (showCommandPalette) {
+    if (showCommandPalette || linkDialog) {
       return;
     }
 
@@ -1259,7 +1373,7 @@
                 class="task-checkbox"
                 checked={/\[[xX]\]/.test(modelLine.prefix)}
                 onchange={() => toggleCheckboxOnLine(rowIdx)}
-              />{/if}{#each segments as seg}{#if seg.cls}<span class={seg.cls}>{seg.text}</span>{:else}{seg.text}{/if}{/each}{/if}</div>
+              />{/if}{#each segments as seg}{#if seg.cls}<span class={seg.cls} data-href={seg.href} title={seg.href ? `${seg.href} (Ctrl+클릭: 열기)` : undefined} onclick={(e) => handleSegmentClick(e, seg.href)}>{seg.text}</span>{:else}{seg.text}{/if}{/each}{/if}</div>
         {/each}
       </div>
     </main>
@@ -1312,6 +1426,20 @@
       <span>{activeTab.viewMode === 'rendered' ? msg.renderedView : msg.codeView}</span>
     </div>
   </footer>
+
+  {#if linkDialog}
+    <div class="link-overlay" role="presentation" onmousedown={(e) => { if (e.target === e.currentTarget) closeLinkDialog(); }}>
+      <form class="link-dialog" onsubmit={(e) => { e.preventDefault(); applyLinkDialog(); }}>
+        <label>텍스트 <input bind:value={linkDialog.text} /></label>
+        <!-- svelte-ignore a11y_autofocus -->
+        <label>URL <input bind:value={linkDialog.url} placeholder="https://… (비우면 링크 제거)" autofocus onkeydown={(e) => { if (e.key === 'Escape') closeLinkDialog(); }} /></label>
+        <div class="link-actions">
+          <button type="button" onclick={closeLinkDialog}>취소</button>
+          <button type="submit">적용</button>
+        </div>
+      </form>
+    </div>
+  {/if}
 
   {#if showCommandPalette}
     <CommandPalette
@@ -1514,6 +1642,54 @@
   .strike-run {
     text-decoration: line-through;
     color: #64748b;
+  }
+  .raw-run {
+    font-family: 'JetBrains Mono', 'D2Coding', monospace;
+    background: #fef9c3;
+    color: #713f12;
+  }
+  .link-run {
+    color: #2563eb;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .link-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.3);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 15vh;
+    z-index: 1000;
+  }
+  .link-dialog {
+    background: var(--bg-primary, #fff);
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 16px;
+    width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  }
+  .link-dialog label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.85em;
+  }
+  .link-dialog input {
+    padding: 6px 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    font-size: 1em;
+  }
+  .link-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
   }
   .code-run {
     font-family: 'JetBrains Mono', 'D2Coding', monospace;

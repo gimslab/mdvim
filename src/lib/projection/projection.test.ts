@@ -167,3 +167,35 @@ describe('mdvim projection engine', () => {
     expect(serializeMarkdown(model)).toBe('일반 ~~수정된 텍스트~~ 끝');
   });
 });
+
+import { parseLine as _pl, serializeLine as _sl } from './index';
+describe('links', () => {
+  it('parses and round-trips [text](url)', () => {
+    const l = _pl('see [Google](https://google.com) now');
+    expect(l.chars.map((c) => c.c).join('')).toBe('see Google now');
+    expect(l.chars[4].href).toBe('https://google.com');
+    l.dirty = true;
+    expect(_sl(l)).toBe('see [Google](https://google.com) now');
+  });
+});
+
+import { revealLine as _rv, renderedColToRawCol as _r2r, reparseCompletedLines as _rc } from './index';
+describe('reveal line', () => {
+  it('shows raw source and maps columns', () => {
+    const l = _pl('a **bold** z');
+    const r = _rv(l);
+    expect(r.chars.map((c) => c.c).join('')).toBe('a **bold** z');
+    expect(_r2r(l, 0)).toBe(0);
+    expect(_r2r(l, 4)).toBe(6); // on the 'l' of bold, after the opening **
+    expect(_r2r(l, 6)).toBe(10); // after the bold span: outside, closing marker precedes
+  });
+  it('stays raw on the same row, reparses when leaving', () => {
+    const m = [_rv(_pl('**x**')), _pl('next')];
+    const stay = _rc(m, 0, 'n', 0, 0, 'n');
+    expect(stay.model[0].revealed).toBe(true);
+    const left = _rc(m, 0, 'n', 1, 0, 'n');
+    expect(left.model[0].revealed).toBeUndefined();
+    expect(left.model[0].chars.map((c) => c.c).join('')).toBe('x');
+    expect(left.bufferChanged).toBe(true);
+  });
+});

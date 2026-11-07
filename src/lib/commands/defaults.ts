@@ -7,6 +7,8 @@ export function createDefaultRegistry(actions: {
   toggleItalic: () => void;
   toggleStrikethrough?: () => void;
   toggleCode: () => void;
+  editLink?: () => void;
+  revealLine?: () => void;
   toggleCheckbox?: () => void;
   newTab: () => void | Promise<void>;
   nextTab: () => void | Promise<void>;
@@ -79,6 +81,21 @@ export function createDefaultRegistry(actions: {
       titleEn: 'Format: Toggle Inline Code',
       category: 'Format',
       action: () => actions.toggleCode(),
+    },
+    {
+      id: 'edit.revealLine',
+      titleKo: '편집: 현재 줄 마크다운 원본 보기/편집 토글',
+      titleEn: 'Edit: Toggle Raw Markdown for Current Line',
+      category: 'Editor',
+      defaultShortcut: 'Ctrl+M',
+      action: () => actions.revealLine?.(),
+    },
+    {
+      id: 'format.editLink',
+      titleKo: '서식: 링크 편집 / 삽입',
+      titleEn: 'Format: Edit Link',
+      category: 'Format',
+      action: () => actions.editLink?.(),
     },
     {
       id: 'format.toggleCheckbox',

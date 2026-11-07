@@ -4,6 +4,7 @@ export interface StyledChar {
   i: boolean; // italic (*text*)
   s?: boolean; // strikethrough (~~text~~)
   code: boolean; // inline code (`text`)
+  href?: string; // link target ([text](href))
 }
 
 export interface ProjectedLine {
@@ -11,13 +12,14 @@ export interface ProjectedLine {
   chars: StyledChar[];
   raw: string;
   dirty: boolean;
+  revealed?: boolean; // line temporarily shown as raw markdown source
 }
 
 // CommonMark 4.1 Thematic breaks: 0-3 leading spaces, 3+ matching -, *, or _ (with optional spaces/tabs between/after), 4+ leading spaces or leading tab is NOT a thematic break.
 export const HR_RE = /^ {0,3}(?:-(?:[ \t]*-){2,}|\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/;
 // CommonMark 4.2 ATX headings & 5.1 Block quotes allow 0-3 leading spaces; lists allow indentation for sublists.
 const PREFIX_RE = /^(?:( {0,3}(?:#{1,6} |>+ ))|([ \t]*(?:[-*+] \[[ xX]\] |[-*+] |\d+\. )))/;
-const INLINE_TOKEN_RE = /(\*\*(.+?)\*\*|~~(.+?)~~|`([^`]+)`|\*([^*]+)\*)/g;
+const INLINE_TOKEN_RE = /(\*\*(.+?)\*\*|~~(.+?)~~|`([^`]+)`|\*([^*]+)\*|\[([^\]]+)\]\(([^)\s]+)\))/g;
 
 export function isHorizontalRulePrefix(prefix: string): boolean {
   return HR_RE.test(prefix);
@@ -54,6 +56,10 @@ export function parseLine(raw: string): ProjectedLine {
       for (const c of Array.from(tm[5])) {
         chars.push({ c, b: false, i: true, s: false, code: false });
       }
+    } else if (tm[6] !== undefined && tm[7] !== undefined) {
+      for (const c of Array.from(tm[6])) {
+        chars.push({ c, b: false, i: false, s: false, code: false, href: tm[7] });
+      }
     }
     last = idx + tm[0].length;
   }
@@ -72,7 +78,7 @@ export function projectLines(model: ProjectedLine[]): string[] {
 }
 
 function sameStyle(a: StyledChar, b: StyledChar): boolean {
-  return a.b === b.b && a.i === b.i && Boolean(a.s) === Boolean(b.s) && a.code === b.code;
+  return a.b === b.b && a.i === b.i && Boolean(a.s) === Boolean(b.s) && a.code === b.code && (a.href ?? '') === (b.href ?? '');
 }
 
 export function serializeLine(l: ProjectedLine): string {
@@ -91,7 +97,9 @@ export function serializeLine(l: ProjectedLine): string {
       .slice(idx, j)
       .map((x) => x.c)
       .join('');
-    if (cs[idx].code) {
+    if (cs[idx].href) {
+      out += `[${s}](${cs[idx].href})`;
+    } else if (cs[idx].code) {
       out += `\`${s}\``;
     } else if (cs[idx].b) {
       const m = /^(\s*)(.*?)(\s*)$/s.exec(s);
@@ -243,10 +251,15 @@ export function applyProjected(model: ProjectedLine[], newLines: string[]): Proj
     inherited = { b: prev.b, i: prev.i, s: Boolean(prev.s), code: prev.code };
   }
 
+  // Inherit link target only when inserting strictly inside a link
+  const leftHref = left.length ? left[left.length - 1].href : undefined;
+  const rightHref = right.length ? right[0].href : undefined;
+  const insideHref = leftHref && leftHref === rightHref ? leftHref : undefined;
+
   const segs: StyledChar[][] = [[]];
   for (const c of ins) {
     if (c === '\n') segs.push([]);
-    else segs[segs.length - 1].push({ c, ...inherited });
+    else segs[segs.length - 1].push({ c, ...inherited, ...(insideHref ? { href: insideHref } : {}) });
   }
   const k = segs.length - 1;
   const mk = (prefix: string, chars: StyledChar[]): ProjectedLine => ({
@@ -259,7 +272,9 @@ export function applyProjected(model: ProjectedLine[], newLines: string[]): Proj
   const result: ProjectedLine[] = [];
   if (k === 0) {
     const prefix = left.length ? model[sl].prefix : model[el].prefix;
-    result.push(mk(prefix, [...left, ...segs[0], ...right]));
+    const merged = mk(prefix, [...left, ...segs[0], ...right]);
+    if (sl === el && model[sl].revealed) merged.revealed = true;
+    result.push(merged);
   } else {
     if (
       k === 1 &&
@@ -283,6 +298,38 @@ export function applyProjected(model: ProjectedLine[], newLines: string[]): Proj
     }
   }
   return [...model.slice(0, sl), ...result, ...model.slice(el + 1)];
+}
+
+const CLOSING_LEN = (c: StyledChar): number =>
+  c.href ? `](${c.href})`.length : c.code ? 1 : c.b ? 2 : c.s ? 2 : c.i ? 1 : 0;
+
+/** Converts a rendered column (char index) to the matching column in the raw markdown source. */
+export function renderedColToRawCol(line: ProjectedLine, col: number): number {
+  const c = Math.max(0, Math.min(col, line.chars.length));
+  const head = serializeLine({ ...line, chars: line.chars.slice(0, c), dirty: true });
+  let n = Array.from(head).length;
+  const prev = line.chars[c - 1];
+  const next = line.chars[c];
+  // Cursor in the middle of a styled span: the closing marker lies after the cursor
+  if (prev && next && sameStyle(prev, next)) n -= CLOSING_LEN(prev);
+  return Math.max(0, n);
+}
+
+/** Converts a raw markdown column back to a rendered column (best effort). */
+export function rawColToRenderedCol(raw: string, col: number): number {
+  return parseLine(Array.from(raw).slice(0, col).join('')).chars.length;
+}
+
+/** Returns a line displayed as raw markdown source (all characters plain, no prefix). */
+export function revealLine(line: ProjectedLine): ProjectedLine {
+  const raw = serializeLine(line);
+  return {
+    prefix: '',
+    chars: Array.from(raw).map((c) => ({ c, b: false, i: false, s: false, code: false })),
+    raw,
+    dirty: true,
+    revealed: true,
+  };
 }
 
 export interface ReparseOutcome {
@@ -312,6 +359,8 @@ export function reparseCompletedLines(
   for (let i = 0; i < nextModel.length; i++) {
     const isCurrentInsertLine = newMode.startsWith('i') && i === newRow;
     if (isCurrentInsertLine || !nextModel[i].dirty) continue;
+    // A revealed (raw source) line stays raw while the cursor remains on it
+    if (nextModel[i].revealed && i === newRow) continue;
 
     const rawLine = serializeLine(nextModel[i]);
     const reparsed = parseLine(rawLine);
@@ -327,7 +376,7 @@ export function reparseCompletedLines(
           !sameStyle(ch, nextModel[i].chars[idx])
       );
 
-    if (styleChanged) {
+    if (styleChanged || nextModel[i].revealed) {
       if (i === newRow) {
         const removedChars = Array.from(oldVisible).length - Array.from(newVisible).length;
         newCursorCol = Math.max(0, newCursorCol - Math.max(0, removedChars));
