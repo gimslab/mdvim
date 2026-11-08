@@ -173,6 +173,45 @@ npm run tauri dev
 npm run tauri build
 ```
 
+#### macOS 전용 빌드 및 설치 안내
+
+macOS에서는 `.app` 번들 또는 `.dmg` 이미지를 생성할 수 있습니다.
+
+1. **`.app` 번들 단독 빌드**:
+   ```bash
+   npm run tauri build -- --bundles app
+   ```
+   빌드 결과물은 `src-tauri/target/release/bundle/macos/mdvim.app` 경로에 생성됩니다.
+
+2. **애플리케이션 폴더로 설치 (`ditto` 권장)**:
+   macOS 앱 번들은 내부 심볼릭 링크 및 메타데이터를 보존해야 하므로 `cp -r` 대신 `ditto` 사용을 권장합니다.
+
+   - **사용자 전용 애플리케이션 폴더 (`~/Applications`)에 설치**:
+     ```bash
+     mkdir -p ~/Applications
+     ditto src-tauri/target/release/bundle/macos/mdvim.app ~/Applications/mdvim.app
+     ```
+   - **전체 시스템 애플리케이션 폴더 (`/Applications`)에 설치**:
+     ```bash
+     sudo ditto src-tauri/target/release/bundle/macos/mdvim.app /Applications/mdvim.app
+     ```
+
+3. **격리 속성(Quarantine) 해제 (자체 빌드 앱 실행 차단 시)**:
+   자체 빌드하거나 서명되지 않은 앱이 Finder/Gatekeeper에서 차단되는 경우, 확장 속성을 제거합니다:
+   ```bash
+   xattr -cr ~/Applications/mdvim.app
+   # 또는 /Applications에 설치한 경우
+   sudo xattr -cr /Applications/mdvim.app
+   ```
+
+4. **Neovim(`nvim`) 의존성**:
+   `mdvim`은 실행 시 시스템의 `nvim` 바이너리를 임베드하여 구동됩니다. Homebrew를 통해 Neovim을 설치해 두면 GUI(Finder, Alfred, Spotlight) 실행 시에도 자동으로 감지합니다:
+   ```bash
+   brew install neovim
+   ```
+
+---
+
 빌드가 완료되면 운영체제별로 아래 디렉토리에 설치 패키지가 생성됩니다.
 
 | OS | 생성되는 패키지 형식 | 빌드 산출물 위치 |
