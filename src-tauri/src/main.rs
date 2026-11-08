@@ -117,9 +117,51 @@ fn is_app_ex_command(cmd: &str) -> bool {
         || c.starts_with("edit ")
 }
 
+fn find_nvim_path() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("NVIM_PATH") {
+        let p = std::path::PathBuf::from(path);
+        if p.exists() {
+            return p;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let candidates = [
+            "/opt/homebrew/bin/nvim",
+            "/usr/local/bin/nvim",
+            "/opt/local/bin/nvim",
+            "/usr/bin/nvim",
+        ];
+        for candidate in candidates {
+            let p = std::path::PathBuf::from(candidate);
+            if p.exists() {
+                return p;
+            }
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        let home_paths = [
+            format!("{}/.local/bin/nvim", home),
+            format!("{}/.cargo/bin/nvim", home),
+            format!("{}/bin/nvim", home),
+        ];
+        for candidate in home_paths {
+            let p = std::path::PathBuf::from(candidate);
+            if p.exists() {
+                return p;
+            }
+        }
+    }
+
+    std::path::PathBuf::from("nvim")
+}
+
 impl NvimSession {
     fn new(initial_lines: Vec<String>) -> Result<Self, String> {
-        let mut child = Command::new("nvim")
+        let nvim_bin = find_nvim_path();
+        let mut child = Command::new(nvim_bin)
             .args(["--embed", "--headless", "-n"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1024,6 +1066,26 @@ fn app_open_url(url: String) -> Result<(), String> {
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(path) = std::env::var("PATH") {
+            let mut parts: Vec<&str> = path.split(':').collect();
+            let extra = ["/opt/homebrew/bin", "/usr/local/bin"];
+            let mut prefix = Vec::new();
+            for p in extra {
+                if !parts.contains(&p) {
+                    prefix.push(p);
+                }
+            }
+            if !prefix.is_empty() {
+                prefix.extend(parts);
+                std::env::set_var("PATH", prefix.join(":"));
+            }
+        } else {
+            std::env::set_var("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+        }
+    }
+
     let initial = vec![String::new()];
     let session = NvimSession::new(initial).expect("Failed to start embedded Neovim");
 
