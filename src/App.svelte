@@ -755,6 +755,12 @@
   }
 
   async function quitAllTabs(force = false, saveBeforeQuit = false, aborted = false) {
+    if (isComposing && preeditText && nvimState.mode.startsWith('i')) {
+      const pending = preeditText;
+      isComposing = false;
+      preeditText = '';
+      await sendNvimPaste(pending);
+    }
     for (const tab of tabs) {
       const timer = autoSaveTimers.get(tab.id);
       if (timer) {
@@ -1173,6 +1179,7 @@
     saveFile: () => saveFile(),
     saveFileAs: () => saveFileAs(),
     installCliPath: () => installCliToPath(),
+    quitApp: () => quitAllTabs(false, true, false),
   });
 
   async function refreshRecentFileCommands() {
@@ -1256,6 +1263,8 @@
 
     if (e.key === 'F1' || e.key === 'F2' || e.key === 'F3' || e.key === 'F4' || e.key === 'F5' || e.key === 'F6' || e.key === 'F7' || e.key === 'F8' || e.key === 'F9' || e.key === 'F10' || e.key === 'F11' || e.key === 'F12') {
       parts.push(e.key);
+    } else if (/^F([1-9]|1[0-2])$/.test(e.code)) {
+      parts.push(e.code);
     } else if (e.code.startsWith('Key')) {
       parts.push(e.code.slice(3).toUpperCase());
     } else if (e.key.length === 1 && /[a-zA-Z]/.test(e.key)) {
@@ -1363,6 +1372,11 @@
 
     if (e.key.length === 1 && e.key.charCodeAt(0) > 127) {
       e.preventDefault();
+      return;
+    }
+
+    // Do not swallow or forward unhandled Cmd/Alt combinations as plain text into Neovim
+    if ((e.metaKey || e.altKey) && !e.ctrlKey) {
       return;
     }
 
@@ -1506,8 +1520,47 @@
     const onWindowFocus = () => {
       checkExternalFileChanges().catch((err) => console.error('Focus file watch error:', err));
     };
+    const onWindowKeyDown = (e: KeyboardEvent) => {
+      const combo = buildKeyCombo(e);
+      if (!combo) return;
+      const target = resolveShortcut(config, combo, nvimState.mode);
+      if (target === 'app.quit') {
+        e.preventDefault();
+        e.stopPropagation();
+        quitAllTabs(false, true, false);
+        return;
+      }
+      if (!showCommandPalette && !linkDialog && document.activeElement !== imeInputEl) {
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'P' || e.key === 'p' || e.code === 'KeyP')) {
+          e.preventDefault();
+          e.stopPropagation();
+          showCommandPalette = true;
+          return;
+        }
+        if (e.key === 'F1') {
+          e.preventDefault();
+          e.stopPropagation();
+          showCommandPalette = true;
+          return;
+        }
+        if (target === 'palette.open') {
+          e.preventDefault();
+          e.stopPropagation();
+          showCommandPalette = true;
+          return;
+        }
+        if (target && target !== 'nvim') {
+          e.preventDefault();
+          e.stopPropagation();
+          commandRegistry.execute(target, commandContext).catch((err) => {
+            console.error(`Failed to execute shortcut command ${target}:`, err);
+          });
+        }
+      }
+    };
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('focus', onWindowFocus);
+    window.addEventListener('keydown', onWindowKeyDown, true);
 
     // Setup periodic interval autosave (e.g. every 30s)
     let intervalTimer: ReturnType<typeof setInterval> | undefined;
@@ -1528,6 +1581,7 @@
       unlisten();
       window.removeEventListener('blur', onWindowBlur);
       window.removeEventListener('focus', onWindowFocus);
+      window.removeEventListener('keydown', onWindowKeyDown, true);
       if (intervalTimer) clearInterval(intervalTimer);
       clearInterval(watcherTimer);
       for (const t of autoSaveTimers.values()) {
@@ -1570,6 +1624,7 @@
         path: t.path,
         viewMode: t.viewMode,
         dirty: t.dirty,
+        hasConflict: Boolean(t.conflictContent != null),
         readonly: Boolean(t.readonly),
         isStdin: Boolean(t.isStdin),
         waitToken: t.waitToken ?? null,

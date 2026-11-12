@@ -19,6 +19,7 @@ export function createDefaultRegistry(actions: {
   saveFile?: () => void | Promise<void>;
   saveFileAs?: () => void | Promise<void>;
   installCliPath?: () => void | Promise<void>;
+  quitApp?: () => void | Promise<void>;
 }): CommandRegistry {
   const registry = new CommandRegistry();
 
@@ -137,6 +138,14 @@ export function createDefaultRegistry(actions: {
       category: 'Tab',
       defaultShortcut: 'Ctrl+W',
       action: () => actions.closeActiveTab(),
+    },
+    {
+      id: 'app.quit',
+      titleKo: '앱: mdvim 종료',
+      titleEn: 'App: Quit mdvim',
+      category: 'Editor',
+      defaultShortcut: 'Ctrl+Q / Alt+F4',
+      action: () => actions.quitApp?.(),
     },
   ];
 

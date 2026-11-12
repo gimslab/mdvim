@@ -242,6 +242,7 @@ macOS에서는 `.app` 번들 또는 `.dmg` 이미지를 생성할 수 있습니�
 | `Ctrl + Shift + P` / `F1` | 항상 (`always`) | **커맨드 팔레트**: 전체 명령어 및 최근 파일 검색·실행 (한국어/영어 지원) |
 | `Ctrl + T` | 항상 (`always`) | **새 탭**: 새 문서 열기 (`untitled.md`, 중복 시 `untitled-N.md`) |
 | `Ctrl + W` | 항상 (`always`) | **탭 닫기**: 현재 활성 탭 닫기 |
+| `Ctrl + Q` / `Cmd + Q` / `Alt + F4` | 항상 (`always`) | **앱 종료**: 열린 변경사항을 자동 저장하고 `mdvim` 애플리케이션 종료 |
 | `Ctrl + Tab` | 항상 (`always`) | 다음 탭으로 이동 |
 | `Ctrl + Shift + Tab` | 항상 (`always`) | 이전 탭으로 이동 |
 | `Ctrl + O` | 항상 (`always`) | 파일 열기 (시스템 네이티브 다이얼로그) |

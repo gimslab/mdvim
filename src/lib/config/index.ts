@@ -43,14 +43,20 @@ export const defaultConfig: MdvimConfig = {
     { key: 'Ctrl+O', when: 'always', command: 'file.open' },
     { key: 'Ctrl+S', when: 'always', command: 'file.save' },
     { key: 'Ctrl+Shift+S', when: 'always', command: 'file.saveAs' },
+    { key: 'Ctrl+Q', when: 'always', command: 'app.quit' },
+    { key: 'Alt+F4', when: 'always', command: 'app.quit' },
   ],
 };
 
 function normalizeKey(key: string): string {
   return key
     .split('+')
-    .map((p) => p.trim())
-    .map((p) => p.toLowerCase())
+    .map((p) => p.trim().toLowerCase())
+    .map((p) => {
+      if (p === 'cmd' || p === 'command' || p === 'meta' || p === 'super') return 'ctrl';
+      if (p === 'opt' || p === 'option') return 'alt';
+      return p;
+    })
     .sort()
     .join('+');
 }

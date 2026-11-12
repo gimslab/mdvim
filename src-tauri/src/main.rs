@@ -850,6 +850,54 @@ async fn app_complete_wait_tab(
     Ok(())
 }
 
+fn save_dirty_tabs_on_close(reported: &LastReportedState, launch_cwd: &Path) {
+    let Ok(mut guard) = reported.state.lock() else {
+        return;
+    };
+    let Some(tabs) = guard.get_mut("tabs").and_then(|t| t.as_array_mut()) else {
+        return;
+    };
+    for tab in tabs.iter_mut() {
+        let dirty = tab.get("dirty").and_then(|v| v.as_bool()).unwrap_or(false);
+        let readonly = tab.get("readonly").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_stdin = tab.get("isStdin").and_then(|v| v.as_bool()).unwrap_or(false);
+        let has_conflict = tab.get("hasConflict").and_then(|v| v.as_bool()).unwrap_or(false);
+        let path_opt = tab
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        if !dirty || readonly || has_conflict || (is_stdin && path_opt.is_none()) {
+            continue;
+        }
+        let Some(content) = tab
+            .get("rawMarkdown")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        else {
+            continue;
+        };
+        let target_path = if let Some(ref p) = path_opt {
+            resolve_user_path_with_base(p, launch_cwd)
+        } else {
+            let title = tab
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("untitled.md");
+            find_unique_untitled_path(launch_cwd, title, &[])
+        };
+        if let Some(parent) = target_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&target_path, &content).is_ok() {
+            record_recent_file(&target_path.to_string_lossy());
+            if let Some(obj) = tab.as_object_mut() {
+                obj.insert("dirty".to_string(), serde_json::Value::Bool(false));
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn app_exit(
     code: i32,
@@ -857,8 +905,13 @@ async fn app_exit(
     app_handle: tauri::AppHandle,
     wait_mgr: tauri::State<'_, Arc<WaitManager>>,
     reported: tauri::State<'_, Arc<LastReportedState>>,
+    launch_state: tauri::State<'_, Arc<InitialLaunchState>>,
 ) -> Result<(), String> {
-    wait_mgr.flush_all(&reported, aborted.unwrap_or(code != 0));
+    let is_aborted = aborted.unwrap_or(code != 0);
+    if !is_aborted {
+        save_dirty_tabs_on_close(&reported, &launch_state.launch_cwd);
+    }
+    wait_mgr.flush_all(&reported, is_aborted);
     app_handle.exit(code);
     Ok(())
 }
@@ -2200,8 +2253,13 @@ fn main() {
 
     let rep_for_win = reported_state.clone();
     let wmgr_for_win = wait_manager.clone();
+    let init_for_win = initial_launch_state.clone();
 
-    tauri::Builder::default()
+    let rep_for_run = reported_state.clone();
+    let wmgr_for_run = wait_manager.clone();
+    let init_for_run = initial_launch_state.clone();
+
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(AppState(Mutex::new(session)))
@@ -2241,14 +2299,29 @@ fn main() {
             );
             Ok(())
         })
-        .on_window_event(move |_window, event| {
-            if matches!(
-                event,
-                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
-            ) {
+        .on_window_event(move |window, event| match event {
+            tauri::WindowEvent::CloseRequested { .. } => {
+                save_dirty_tabs_on_close(&rep_for_win, &init_for_win.launch_cwd);
                 wmgr_for_win.flush_all(&rep_for_win, false);
             }
+            tauri::WindowEvent::Destroyed => {
+                use tauri::Manager;
+                save_dirty_tabs_on_close(&rep_for_win, &init_for_win.launch_cwd);
+                wmgr_for_win.flush_all(&rep_for_win, false);
+                window.app_handle().exit(0);
+            }
+            _ => {}
         })
-        .run(tauri::generate_context!())
-        .expect("error while running mdvim");
+        .build(tauri::generate_context!())
+        .expect("error while building mdvim");
+
+    app.run(move |_app_handle, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            save_dirty_tabs_on_close(&rep_for_run, &init_for_run.launch_cwd);
+            wmgr_for_run.flush_all(&rep_for_run, false);
+        }
+    });
 }

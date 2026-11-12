@@ -79,4 +79,15 @@ describe('default shortcuts', () => {
       expect(resolveShortcut(defaultConfig, 'Ctrl+M', mode)).toBe('edit.revealLine');
     }
   });
+
+  it('maps OS quit shortcuts (Ctrl+Q, Cmd+Q, Alt+F4) to app.quit in every mode', () => {
+    for (const mode of ['n', 'i', 'v', 'c']) {
+      expect(resolveShortcut(defaultConfig, 'Ctrl+Q', mode)).toBe('app.quit');
+      expect(resolveShortcut(defaultConfig, 'Cmd+Q', mode)).toBe('app.quit');
+      expect(resolveShortcut(defaultConfig, 'Command+Q', mode)).toBe('app.quit');
+      expect(resolveShortcut(defaultConfig, 'Meta+Q', mode)).toBe('app.quit');
+      expect(resolveShortcut(defaultConfig, 'Alt+F4', mode)).toBe('app.quit');
+      expect(resolveShortcut(defaultConfig, 'Option+F4', mode)).toBe('app.quit');
+    }
+  });
 });
