@@ -133,7 +133,7 @@ flowchart LR
 ### 5.3 커맨드 기반 단축키 라우팅 규칙
 - 모든 액션은 고유 커맨드 ID로 정의되며, 어떤 단축키를 어느 모드(`normal`, `insert`, `visual`, `always`)에서 어떤 커맨드(또는 Neovim 자체 키)로 실행할지 **설정 파일(`config.toml`)에서 사용자가 자유롭게 커스터마이징 가능**해야 합니다.
 - **기본값**:
-  - **`always` (전역)**: `Ctrl+Shift+P` (커맨드 팔레트 열기), `Ctrl+E` (뷰 모드 토글), `Ctrl+S` (파일 저장), `Ctrl+M` (현재 줄 원본 보기, `edit.revealLine`). `Ctrl+K`는 Vim의 디그래프 입력과 충돌하므로 사용하지 않습니다.
+  - **`always` (전역)**: `Ctrl+Shift+P` (커맨드 팔레트 열기), `Ctrl+E` (뷰 모드 토글), `Ctrl+S` (파일 저장), `Ctrl+M` (현재 줄 원본 보기, `edit.revealLine`), `Ctrl+Q` / `Cmd+Q` / `Alt+F4` (앱 종료, `app.quit`). `Ctrl+K`는 Vim의 디그래프 입력과 충돌하므로 사용하지 않습니다.
   - **`normal` 모드**: `Ctrl+B`(페이지 위), `Ctrl+F`(페이지 아래), `Ctrl+R`(Redo), `Ctrl+V`(Visual Block) 등 표준 Vim 키를 Neovim에 우선 전달합니다.
   - **`insert` 모드**: `Ctrl+B`(`format.toggleBold`), `Ctrl+I`(`format.toggleItalic`) 등을 서식 커맨드로 동작시킵니다.
 
@@ -166,7 +166,7 @@ flowchart LR
 - **자동 저장 (Auto-save) + `:w` / `:q` 호환**:
   - 일정 시간 간격, 타이핑이 멈췄을 때(debounce), 창이 포커스를 잃었을 때(blur) 모두 자동 저장이 동작합니다.
   - Vim의 `:w`, `:q`, `:wq`, `:qa` 명령도 그대로 동작합니다.
-  - **탭과 `:q` 규칙**: 열린 탭이 여러 개일 때 `:q`는 현재 탭만 닫고, 마지막 남은 탭에서 `:q`를 실행하거나 `:qa`를 실행하면 앱을 종료합니다.
+  - **탭과 `:q` 및 OS 종료 단축키 규칙**: 열린 탭이 여러 개일 때 `:q`는 현재 탭만 닫고, 마지막 남은 탭에서 `:q`를 실행하거나 `:qa`를 실행하면 앱을 종료합니다. 또한 macOS(`Cmd+Q`), Windows/Linux(`Alt+F4`, `Ctrl+Q`) 등 각 OS별 애플리케이션 종료 단축키(`app.quit`)나 창 닫기 이벤트 발생 시에도 미저장 변경사항을 자동 저장하고 `--wait` 대기 상태를 정리한 뒤 동일하게 앱을 종료합니다.
 - **외부 파일 변경 감지 (File Watcher)**:
   - 외부 프로그램이 파일을 변경했을 때 현재 버퍼가 수정 중(dirty)이 아니면 자동으로 다시 불러오고, 수정 중이면 충돌 알림을 띄워 사용자가 선택하게 합니다.
 - **CLI 실행, Vim 옵션 및 표준 입출력(stdin/stdout) 지원 ([CLI_DESIGN.md](file:///home/gim/projects/mdvim/docs/CLI_DESIGN.md))**:
@@ -183,7 +183,7 @@ flowchart LR
 ## 7. 확장성: 커맨드 아키텍처, 커맨드 팔레트 & 외부 AI 개발 툴 제어
 
 ### 7.1 단일 커맨드 레지스트리 (Unified Command Registry)
-- 앱의 모든 액션은 고유 ID(예: `view.toggleMode`, `view.setMode`, `format.toggleBold`, `format.toggleItalic`, `format.toggleCode`, `format.toggleCheckbox`, `tab.new`, `tab.switch`, `tab.close`, `file.open`, `file.save`, `editor.getDocument`, `editor.setDocument`, `editor.insertMarkdown`, `nvim.sendKeys`, `nvim.execCommand` 등)와 JSON 인자/반환 스키마를 가진 **Command**로 정의됩니다.
+- 앱의 모든 액션은 고유 ID(예: `view.toggleMode`, `view.setMode`, `format.toggleBold`, `format.toggleItalic`, `format.toggleCode`, `format.toggleCheckbox`, `tab.new`, `tab.switch`, `tab.close`, `app.quit`, `file.open`, `file.save`, `editor.getDocument`, `editor.setDocument`, `editor.insertMarkdown`, `nvim.sendKeys`, `nvim.execCommand` 등)와 JSON 인자/반환 스키마를 가진 **Command**로 정의됩니다.
 - UI 버튼, 단축키, 커맨드 팔레트, Neovim Ex 명령(`:Commands` 등), 외부 AI 개발 툴은 모두 동일한 Command Registry를 통해 액션을 수행합니다.
 
 ### 7.2 커맨드 팔레트 (Command Palette) 및 단축키 매핑

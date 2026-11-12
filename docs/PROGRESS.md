@@ -63,7 +63,9 @@
   - [x] 외부 AI 에이전트용 [SKILL.md](file:///home/gim/projects/mdvim/SKILL.md) 작성 및 동기화
 
 ### 2.5 파일 입출력, 탭 관리 & Vim Ex 명령줄
-- [x] **멀티 탭(Multi-tab) 관리**: 새 탭(`Ctrl+T`), 탭 전환(`Ctrl+Tab`/`Ctrl+Shift+Tab`), 탭 닫기(`Ctrl+W`), 탭별 독립 상태 유지
+- [x] **멀티 탭(Multi-tab) 관리 및 앱 종료 단축키**:
+  - [x] 새 탭(`Ctrl+T`), 탭 전환(`Ctrl+Tab`/`Ctrl+Shift+Tab`), 탭 닫기(`Ctrl+W`), 탭별 독립 상태 유지
+  - [x] 각 OS별 애플리케이션 종료 단축키(`Cmd+Q`, `Ctrl+Q`, `Alt+F4` → `app.quit`) 및 창 닫기 이벤트 시 미저장 탭 자동 저장 후 일관된 앱 종료 처리
 - [x] **네이티브 파일 열기 / 저장 / 다른 이름으로 저장**:
   - [x] `Ctrl+O` (`file.open`), `Ctrl+S` (`file.save`), `Ctrl+Shift+S` (`file.saveAs`)
   - [x] 수정 여부(`dirty`) 상태바 및 탭 표시기(`•`)
@@ -138,8 +140,9 @@
 
 | 날짜 | 주요 변경 내용 | 관련 커밋 |
 |---|---|---|
-| 2026-11-12 | CLI 실행 환경 지원(`mdvim ~/docs/test.md`, `+line`, `+/pattern`, `-R`, `--wait`, `--code`, `stdin`/`stdout` 파이프라인, `mdvim ctl` 네이티브 통합, PATH 심볼릭 링크 자동 설치) 구현 | - |
-| 2026-11-12 | 커서 이동 시 뷰포트 자동 스크롤(`scrollEditorCursorIntoView`) 및 탭 전환 시 커서/스크롤 위치 보존 구현 | - |
+| 2026-11-12 | macOS(`Cmd+Q`), Windows/Linux(`Alt+F4`, `Ctrl+Q`) 등 OS별 앱 종료 단축키(`app.quit`) 및 창 종료 시 자동 저장 통합 처리 | `ac66181` |
+| 2026-11-12 | CLI 실행 환경 지원(`mdvim ~/docs/test.md`, `+line`, `+/pattern`, `-R`, `--wait`, `--code`, `stdin`/`stdout` 파이프라인, `mdvim ctl` 네이티브 통합, PATH 심볼릭 링크 자동 설치) 구현 | `9a8e08a` |
+| 2026-11-12 | 커서 이동 시 뷰포트 자동 스크롤(`scrollEditorCursorIntoView`) 및 탭 전환 시 커서/스크롤 위치 보존 구현 | `a0f1f04` |
 | 2026-10-19 | 사용자 `config.toml` 단축키를 기본 단축키와 병합(`mergeShortcutRules`)하도록 수정 및 `Ctrl+L` 체크박스 토글 동작 개선 | `8d322ee` |
 | 2026-10-19 | 인라인 취소선(`~~text~~`) 투영/렌더링/단축키(`Ctrl+D`), 체크박스 토글 단축키(`Ctrl+L`), 최근 파일 목록(`recent.json`) 구현 | `de9b430` |
 | 2026-10-19 | 외부 파일 변경 감지(File Watcher) 및 충돌 배너, CLI 파일 인자 로드, 렌더링 뷰 즉시 변환 및 목록 자동 완성 구현 | `c82aaf1` |
