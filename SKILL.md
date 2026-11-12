@@ -13,17 +13,42 @@ This skill allows external AI agents (such as Antigravity, Claude Code, Gemini C
   - Linux / macOS: `/tmp/mdvim-<UID>.sock` (Unix Domain Socket)
   - Windows: `%TEMP%\mdvim.sock`
 - **Protocol**: Single line JSON-RPC newline-delimited messages (`\n`).
-- **CLI Bridge**: `node bin/mdvim-ctl.js <command>` (or `mdvim-ctl <command>` when installed).
+- **CLI Bridge**: Native `mdvim ctl <command>` built directly into the `mdvim` binary (or `node bin/mdvim-ctl.js <command>`).
 
 ---
 
 ## 2. CLI Usage Reference
 
+### 2.0 Opening Files, Stdin/Stdout Pipelines & Vim Flags (`mdvim`)
+```bash
+# Open file(s) in running window (or launch background window if none running)
+mdvim ~/docs/test.md
+mdvim file1.md file2.md
+
+# Open at specific line, last line, or search pattern
+mdvim +42 ~/docs/test.md
+mdvim ~/docs/test.md:42:5
+mdvim + ~/docs/test.md
+mdvim +/TODO ~/docs/test.md
+
+# Read-only mode, initial view mode, startup Ex command
+mdvim -R --code ~/docs/spec.md
+mdvim -c "normal! zz" ~/docs/test.md
+
+# Wait for tab/window close (e.g. git commit editor)
+mdvim --wait COMMIT_EDITMSG
+
+# Standard input (stdin) and Standard output (stdout) pipeline
+cat draft.md | mdvim -
+cat draft.md | mdvim - > edited.md
+mdvim --stdout ~/docs/test.md | pbcopy
+```
+
 ### 2.1 Get Editor State (`get-state`)
 Inspects active tabs, the raw markdown content, current cursor position, and Vim modal status.
 
 ```bash
-node bin/mdvim-ctl.js get-state
+mdvim ctl get-state
 ```
 
 **Example JSON Response**:
@@ -152,6 +177,7 @@ node bin/mdvim-ctl.js insert-text "안녕하세요, AI가 작성한 마크다운
 | `file.open`       | `Editor` | Open Markdown / Text file via native dialog | `Ctrl+O` |
 | `file.save`       | `Editor` | Save active file | `Ctrl+S` |
 | `file.saveAs`     | `Editor` | Save active file as new file | `Ctrl+Shift+S` |
+| `cli.installPath` | `Editor` | Install `mdvim` CLI symlink in user PATH | - |
 | `recent.open.<N>` | `Editor` | Reopen N-th recently opened/saved file | - |
 
 ---

@@ -63,12 +63,32 @@
     viewMode: 'rendered' | 'code';
     mdModel: ProjectedLine[];
     dirty: boolean;
+    readonly?: boolean;
+    isStdin?: boolean;
+    waitToken?: string | null;
     lastMtimeMs?: number;
     diskContent?: string;
     conflictContent?: string | null;
     cursorRow?: number;
     cursorCol?: number;
     scrollTop?: number;
+  }
+
+  interface CliFileEntry {
+    path: string | null;
+    title: string | null;
+    content: string;
+    mtime_ms: number;
+    exists: boolean;
+    is_stdin: boolean;
+    readonly: boolean;
+    view_mode: 'rendered' | 'code' | null;
+    target_line: number | null;
+    target_col: number | null;
+    jump_last_line: boolean;
+    search_pattern: string | null;
+    commands: string[];
+    wait_token: string | null;
   }
 
   interface RenderSegment {
@@ -82,7 +102,19 @@
   let msg = $derived(t(config.locale));
   let showInspector = $state(true);
   let showCommandPalette = $state(false);
+  let appInitialized = $state(false);
+  let statusNotice = $state<string | null>(null);
+  let statusNoticeTimer: ReturnType<typeof setTimeout> | null = null;
   let linkDialog = $state<{ row: number; start: number; end: number; text: string; url: string } | null>(null);
+
+  function showNotice(text: string, durationMs = 4000) {
+    statusNotice = text;
+    if (statusNoticeTimer) clearTimeout(statusNoticeTimer);
+    statusNoticeTimer = setTimeout(() => {
+      statusNotice = null;
+      statusNoticeTimer = null;
+    }, durationMs);
+  }
 
   let tabs = $state<TabDoc[]>([
     {
@@ -553,9 +585,195 @@
     await selectTab(prevIdx);
   }
 
-  async function closeActiveTab(force = false) {
+  async function notifyTabWaitCompletion(tab: TabDoc | undefined, aborted = false) {
+    if (!tab?.waitToken) return;
+    const tok = tab.waitToken;
+    tab.waitToken = null;
+    try {
+      await invoke('app_complete_wait_tab', {
+        waitToken: tok,
+        content: serializeMarkdown(tab.mdModel),
+        aborted,
+      });
+    } catch (err) {
+      console.error('Failed to complete wait tab:', err);
+    }
+  }
+
+  function resolveEntryCursor(
+    mdModel: ProjectedLine[],
+    viewMode: 'rendered' | 'code',
+    entry: CliFileEntry
+  ): { row: number; col: number } {
+    const totalLines = Math.max(1, mdModel.length);
+    let row = 0;
+    let col = entry.target_col && entry.target_col > 0 ? entry.target_col - 1 : 0;
+
+    if (entry.jump_last_line) {
+      row = totalLines - 1;
+    } else if (entry.target_line && entry.target_line > 0) {
+      row = Math.min(entry.target_line - 1, totalLines - 1);
+    } else if (entry.search_pattern) {
+      const pat = entry.search_pattern;
+      const lines =
+        viewMode === 'rendered'
+          ? projectLines(mdModel)
+          : serializeMarkdown(mdModel).split('\n');
+      let foundIdx = lines.findIndex((l) => l.includes(pat));
+      if (foundIdx < 0) {
+        const lowerPat = pat.toLowerCase();
+        foundIdx = lines.findIndex((l) => l.toLowerCase().includes(lowerPat));
+      }
+      if (foundIdx >= 0) {
+        row = foundIdx;
+        const matchCol = lines[foundIdx].toLowerCase().indexOf(pat.toLowerCase());
+        if (matchCol >= 0 && !entry.target_col) {
+          col = matchCol;
+        }
+      }
+    }
+
+    return { row: Math.max(0, row), col: Math.max(0, col) };
+  }
+
+  async function runStartupCommands(commands: string[]) {
+    if (!commands || commands.length === 0) return;
+    for (const rawCmd of commands) {
+      const cmd = rawCmd.trim();
+      if (!cmd) continue;
+      if (commandRegistry.get(cmd)) {
+        await commandRegistry.execute(cmd, commandContext);
+      } else {
+        try {
+          const st = await invoke<NvimState>('nvim_exec_command', { command: cmd });
+          await syncFromNvimState(st);
+        } catch (err) {
+          console.warn(`Failed to run CLI command "${cmd}":`, err);
+        }
+      }
+    }
+  }
+
+  async function openCliEntries(entries: CliFileEntry[], isInitialStartup = false) {
+    if (!entries || entries.length === 0) return;
+
+    saveCurrentTabViewportState();
+
+    let firstTargetIdx = -1;
+    let firstEntry: CliFileEntry | null = null;
+
+    for (let i = 0; i < entries.length; i++) {
+      const f = entries[i];
+      const existingIdx =
+        !f.is_stdin && f.path ? tabs.findIndex((t) => t.path === f.path) : -1;
+
+      if (existingIdx >= 0) {
+        const existingTab = tabs[existingIdx];
+        if (f.view_mode === 'code' || f.view_mode === 'rendered') {
+          existingTab.viewMode = f.view_mode;
+        }
+        if (f.readonly) {
+          existingTab.readonly = true;
+        }
+        if (f.wait_token) {
+          existingTab.waitToken = f.wait_token;
+        }
+        const pos = resolveEntryCursor(existingTab.mdModel, existingTab.viewMode, f);
+        existingTab.cursorRow = pos.row;
+        existingTab.cursorCol = pos.col;
+        if (firstTargetIdx < 0) {
+          firstTargetIdx = existingIdx;
+          firstEntry = f;
+        }
+        continue;
+      }
+
+      const viewMode: 'rendered' | 'code' =
+        f.view_mode === 'code' || f.view_mode === 'rendered'
+          ? f.view_mode
+          : 'rendered';
+      const mdModel = parseMarkdown(f.content);
+      const pos = resolveEntryCursor(mdModel, viewMode, f);
+      const title =
+        f.title ||
+        (f.path ? f.path.split(/[/\\]/).pop() : null) ||
+        (f.is_stdin ? '[stdin]' : `untitled.md`);
+
+      const newTab: TabDoc = {
+        id: `tab-cli-${Date.now()}-${i + 1}`,
+        title,
+        path: f.path,
+        viewMode,
+        mdModel,
+        dirty: false,
+        readonly: Boolean(f.readonly),
+        isStdin: Boolean(f.is_stdin),
+        waitToken: f.wait_token || null,
+        lastMtimeMs: f.mtime_ms,
+        diskContent: f.content,
+        conflictContent: null,
+        cursorRow: pos.row,
+        cursorCol: pos.col,
+        scrollTop: 0,
+      };
+
+      const current = tabs[activeTabIndex];
+      const canReplaceUntouched =
+        (isInitialStartup && i === 0) ||
+        (tabs.length === 1 &&
+          current &&
+          !current.path &&
+          !current.isStdin &&
+          !current.waitToken &&
+          !current.dirty &&
+          current.title.startsWith('untitled'));
+
+      if (canReplaceUntouched && i === 0) {
+        tabs[0] = newTab;
+        if (firstTargetIdx < 0) {
+          firstTargetIdx = 0;
+          firstEntry = f;
+        }
+      } else {
+        tabs.push(newTab);
+        if (firstTargetIdx < 0) {
+          firstTargetIdx = tabs.length - 1;
+          firstEntry = f;
+        }
+      }
+    }
+
+    if (firstTargetIdx >= 0) {
+      activeTabIndex = firstTargetIdx;
+      const active = tabs[activeTabIndex];
+      await loadTabIntoNvim(active, active.cursorRow ?? 0, active.cursorCol ?? 0, 0);
+      if (firstEntry && firstEntry.commands && firstEntry.commands.length > 0) {
+        await runStartupCommands(firstEntry.commands);
+      }
+    }
+    await refreshRecentFileCommands();
+  }
+
+  async function quitAllTabs(force = false, saveBeforeQuit = false, aborted = false) {
+    for (const tab of tabs) {
+      const timer = autoSaveTimers.get(tab.id);
+      if (timer) {
+        clearTimeout(timer);
+        autoSaveTimers.delete(tab.id);
+      }
+      if (!aborted && (saveBeforeQuit || !force) && tab.dirty && !tab.readonly && !(tab.isStdin && !tab.path)) {
+        await autoSaveTab(tab);
+      }
+      await notifyTabWaitCompletion(tab, aborted);
+    }
+    setTimeout(() => {
+      invoke('app_exit', { code: aborted ? 1 : 0, aborted }).catch(() => {});
+    }, 30);
+  }
+
+  async function closeActiveTab(force = false, quitAppIfLast = false, aborted = false) {
     const tabToClose = tabs[activeTabIndex];
-    if (!force && tabToClose?.dirty) {
+    if (!force && !aborted && tabToClose?.dirty && !tabToClose.readonly && !(tabToClose.isStdin && !tabToClose.path)) {
       await autoSaveTab(tabToClose);
     }
     const timer = autoSaveTimers.get(tabToClose?.id);
@@ -564,10 +782,21 @@
       autoSaveTimers.delete(tabToClose.id);
     }
 
+    await notifyTabWaitCompletion(tabToClose, aborted);
+
     if (tabs.length <= 1) {
-      // Don't close the last tab, reset it to a clean untitled document instead
+      if (quitAppIfLast) {
+        setTimeout(() => {
+          invoke('app_exit', { code: aborted ? 1 : 0, aborted }).catch(() => {});
+        }, 30);
+        return;
+      }
+      // Don't close the last tab when triggered via Ctrl+W; reset it to a clean untitled document instead
       tabs[0].title = await getNextUntitledName(tabs[0].id);
       tabs[0].path = null;
+      tabs[0].readonly = false;
+      tabs[0].isStdin = false;
+      tabs[0].waitToken = null;
       tabs[0].mdModel = parseMarkdown('');
       tabs[0].dirty = false;
       tabs[0].cursorRow = 0;
@@ -594,8 +823,17 @@
       cmd.startsWith('write ') ||
       cmd.startsWith('write! ')
     ) {
+      const isForce = cmd.startsWith('w!') || cmd.startsWith('write!');
       const argPath = cmd.replace(/^(?:write!?|w!?)\s*/, '').trim();
-      await saveFile(argPath || undefined);
+      await saveFile(argPath || undefined, isForce);
+    } else if (cmd === 'cq' || cmd === 'cq!' || cmd === 'cquit' || cmd === 'cquit!') {
+      await quitAllTabs(true, false, true);
+    } else if (cmd === 'qa!' || cmd === 'qall!') {
+      await quitAllTabs(true, false, false);
+    } else if (cmd === 'qa' || cmd === 'qall') {
+      await quitAllTabs(false, false, false);
+    } else if (cmd === 'wqa' || cmd === 'wqa!' || cmd === 'xa' || cmd === 'xa!') {
+      await quitAllTabs(cmd.endsWith('!'), true, false);
     } else if (
       cmd === 'q!' ||
       cmd === 'quit!' ||
@@ -606,15 +844,9 @@
       cmd === 'tabc!' ||
       cmd === 'tabclose!' ||
       cmd === 'close!' ||
-      cmd === 'clo!' ||
-      cmd === 'qa!' ||
-      cmd === 'qall!' ||
-      cmd === 'cq' ||
-      cmd === 'cq!' ||
-      cmd === 'cquit' ||
-      cmd === 'cquit!'
+      cmd === 'clo!'
     ) {
-      await closeActiveTab(true);
+      await closeActiveTab(true, true, false);
     } else if (
       cmd === 'q' ||
       cmd === 'quit' ||
@@ -625,28 +857,23 @@
       cmd === 'tabc' ||
       cmd === 'tabclose' ||
       cmd === 'close' ||
-      cmd === 'clo' ||
-      cmd === 'qa' ||
-      cmd === 'qall'
+      cmd === 'clo'
     ) {
-      await closeActiveTab(false);
+      await closeActiveTab(false, true, false);
     } else if (
       cmd === 'wq' ||
       cmd === 'wq!' ||
-      cmd === 'wqa' ||
-      cmd === 'wqa!' ||
       cmd === 'x' ||
       cmd === 'x!' ||
-      cmd === 'xa' ||
-      cmd === 'xa!' ||
       cmd === 'xit' ||
       cmd === 'xit!' ||
       cmd === 'exit' ||
       cmd === 'exit!'
     ) {
-      const ok = await saveFile();
-      if (ok || cmd.endsWith('!')) {
-        await closeActiveTab(true);
+      const isForce = cmd.endsWith('!');
+      const ok = await saveFile(undefined, isForce);
+      if (ok || isForce) {
+        await closeActiveTab(true, true, false);
       }
     } else if (cmd === 'tabnew' || cmd === 'tabe' || cmd === 'tabedit' || cmd === 'enew' || cmd === 'enew!') {
       await addNewTab();
@@ -694,7 +921,8 @@
 
       // Check if current tab is an untouched untitled tab
       const current = tabs[activeTabIndex];
-      const isCleanUntitled = current && !current.path && !current.dirty && current.title.startsWith('untitled');
+      const isCleanUntitled =
+        current && !current.path && !current.isStdin && !current.waitToken && !current.dirty && current.title.startsWith('untitled');
 
       const newDoc: TabDoc = {
         id: `tab-${Date.now()}`,
@@ -727,7 +955,7 @@
     const tab = tabs[activeTabIndex];
     try {
       const filePath = await save({
-        defaultPath: tab.path || tab.title || 'document.md',
+        defaultPath: tab.path || (tab.isStdin ? 'stdin.md' : tab.title) || 'document.md',
         filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
       });
       if (!filePath) return false;
@@ -740,6 +968,8 @@
 
       tab.path = resolvedPath;
       tab.title = resolvedPath.split(/[/\\]/).pop() || tab.title;
+      tab.readonly = false;
+      tab.isStdin = false;
       tab.diskContent = markdown;
       tab.conflictContent = null;
       tab.dirty = false;
@@ -754,13 +984,14 @@
   let autoSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   function scheduleDebouncedAutoSave(tab: TabDoc) {
+    if (tab.readonly || (tab.isStdin && !tab.path)) return;
     const existingTimer = autoSaveTimers.get(tab.id);
     if (existingTimer) {
       clearTimeout(existingTimer);
     }
     const timer = setTimeout(async () => {
       autoSaveTimers.delete(tab.id);
-      if (tab.dirty && !tab.conflictContent) {
+      if (tab.dirty && !tab.conflictContent && !tab.readonly && !(tab.isStdin && !tab.path)) {
         await autoSaveTab(tab);
       }
     }, config.autoSaveDebounceMs || 1500);
@@ -768,7 +999,7 @@
   }
 
   async function autoSaveTab(tab: TabDoc): Promise<boolean> {
-    if (!tab.dirty || tab.conflictContent) return false;
+    if (!tab.dirty || tab.conflictContent || tab.readonly || (tab.isStdin && !tab.path)) return false;
     const existing = autoSaveTimers.get(tab.id);
     if (existing) {
       clearTimeout(existing);
@@ -801,14 +1032,25 @@
 
   async function autoSaveAllDirtyTabs(): Promise<void> {
     for (const tab of tabs) {
-      if (tab.dirty && !tab.conflictContent) {
+      if (tab.dirty && !tab.conflictContent && !tab.readonly && !(tab.isStdin && !tab.path)) {
         await autoSaveTab(tab);
       }
     }
   }
 
-  async function saveFile(targetPath?: string): Promise<boolean> {
+  async function saveFile(targetPath?: string, force = false): Promise<boolean> {
     const tab = tabs[activeTabIndex];
+    if (tab.readonly && !force && !targetPath) {
+      showNotice('읽기 전용(Read-only) 문서입니다. 강제 저장하려면 :w! 또는 다른 이름으로 저장(Ctrl+Shift+S)을 사용하세요.');
+      return false;
+    }
+    if (tab.isStdin && !tab.path && !targetPath) {
+      if (tab.waitToken) {
+        tab.dirty = false;
+        return true;
+      }
+      return await saveFileAs();
+    }
     try {
       const markdown = serializeMarkdown(tab.mdModel);
       let resolvedPath: string;
@@ -825,6 +1067,8 @@
       }
       tab.path = resolvedPath;
       tab.title = resolvedPath.split(/[/\\]/).pop() || tab.title;
+      if (force) tab.readonly = false;
+      tab.isStdin = false;
       tab.diskContent = markdown;
       tab.conflictContent = null;
       tab.dirty = false;
@@ -901,6 +1145,15 @@
     await saveFile();
   }
 
+  async function installCliToPath() {
+    try {
+      const resultMsg = await invoke<string>('app_install_cli_path');
+      showNotice(resultMsg, 6000);
+    } catch (err: any) {
+      showNotice(`CLI 설치 실패: ${err?.message || String(err)}`, 6000);
+    }
+  }
+
   const commandRegistry = createDefaultRegistry({
     toggleViewMode: () => switchViewMode(activeTab.viewMode === 'rendered' ? 'code' : 'rendered'),
     switchViewMode: (m) => switchViewMode(m),
@@ -914,11 +1167,12 @@
     newTab: () => addNewTab(),
     nextTab: () => nextTab(),
     prevTab: () => prevTab(),
-    closeActiveTab: () => closeActiveTab(),
+    closeActiveTab: () => closeActiveTab(false, false, false),
     toggleInspector: () => { showInspector = !showInspector; },
     openFile: () => openFile(),
     saveFile: () => saveFile(),
     saveFileAs: () => saveFileAs(),
+    installCliPath: () => installCliToPath(),
   });
 
   async function refreshRecentFileCommands() {
@@ -1179,38 +1433,35 @@
       console.warn('Failed to load user config.toml, using defaults:', err);
     }
 
-    // Check if files were passed via CLI arguments (e.g. `mdvim file.md`)
+    // Check if files or stdin buffers were passed via CLI arguments (e.g. `mdvim file.md`, `mdvim +42 file.md`, `cat a.md | mdvim -`)
+    let loadedCliEntries = false;
     try {
-      const cliFiles = await invoke<Array<{ path: string; content: string; mtime_ms: number }>>('app_get_cli_files');
+      const cliFiles = await invoke<CliFileEntry[]>('app_get_cli_files');
       if (cliFiles && cliFiles.length > 0) {
-        tabs = cliFiles.map((f, idx) => ({
-          id: `tab-cli-${idx + 1}`,
-          title: f.path.split(/[/\\]/).pop() || `document-${idx + 1}.md`,
-          path: f.path,
-          viewMode: 'rendered',
-          mdModel: parseMarkdown(f.content),
-          dirty: false,
-          lastMtimeMs: f.mtime_ms,
-          diskContent: f.content,
-          conflictContent: null,
-        }));
-        activeTabIndex = 0;
+        await openCliEntries(cliFiles, true);
+        loadedCliEntries = true;
       }
     } catch (err) {
       console.warn('Failed to load CLI file args:', err);
     }
 
-    if (!tabs[0].path) {
-      tabs[0].title = await getNextUntitledName(tabs[0].id);
+    if (!loadedCliEntries) {
+      if (!tabs[0].path && !tabs[0].isStdin) {
+        tabs[0].title = await getNextUntitledName(tabs[0].id);
+      }
+      await loadTabIntoNvim(tabs[0], 0, 0);
+      await refreshRecentFileCommands();
     }
-    await loadTabIntoNvim(tabs[0], 0, 0);
-    await refreshRecentFileCommands();
 
-    // Listen for external IPC control requests (mdvim ctl)
+    // Listen for external IPC control requests (mdvim ctl & CLI single-instance handoff)
     const unlisten = await listen<{ id: number; method: string; params: any }>('ctl-request', async (event) => {
       const { id, method, params } = event.payload;
       try {
-        if (method === 'list-commands') {
+        if (method === 'open-files') {
+          const entries: CliFileEntry[] = Array.isArray(params?.entries) ? params.entries : [];
+          await openCliEntries(entries, false);
+          await invoke('ctl_response', { reqId: id, result: { status: 'ok' } });
+        } else if (method === 'list-commands') {
           const list = commandRegistry.list().map((c) => ({
             id: c.id,
             titleKo: c.titleKo,
@@ -1271,6 +1522,8 @@
       checkExternalFileChanges().catch(() => {});
     }, 1500);
 
+    appInitialized = true;
+
     return () => {
       unlisten();
       window.removeEventListener('blur', onWindowBlur);
@@ -1298,6 +1551,7 @@
 
   // Continuously report current state to backend IPC cache
   $effect(() => {
+    if (!appInitialized) return;
     const st = {
       activeTab: {
         id: activeTab.id,
@@ -1306,6 +1560,9 @@
         viewMode: activeTab.viewMode,
         rawMarkdown: rawMarkdownPreview,
         dirty: activeTab.dirty,
+        readonly: Boolean(activeTab.readonly),
+        isStdin: Boolean(activeTab.isStdin),
+        waitToken: activeTab.waitToken ?? null,
       },
       tabs: tabs.map((t) => ({
         id: t.id,
@@ -1313,6 +1570,10 @@
         path: t.path,
         viewMode: t.viewMode,
         dirty: t.dirty,
+        readonly: Boolean(t.readonly),
+        isStdin: Boolean(t.isStdin),
+        waitToken: t.waitToken ?? null,
+        rawMarkdown: serializeMarkdown(t.mdModel),
       })),
       activeTabIndex,
       cursor: {
@@ -1334,7 +1595,7 @@
           class="tab-btn {idx === activeTabIndex ? 'active' : ''}"
           onclick={() => selectTab(idx)}
         >
-          {tab.title}{tab.dirty ? ' •' : ''}
+          {tab.title}{tab.readonly ? ' [RO]' : ''}{tab.dirty ? ' •' : ''}
         </button>
       {/each}
       <button class="tab-add-btn" onclick={addNewTab}>{msg.newTab}</button>
@@ -1389,6 +1650,17 @@
       </button>
     </div>
   </header>
+
+  {#if statusNotice}
+    <div class="conflict-banner">
+      <span>ℹ {statusNotice}</span>
+      <div class="conflict-actions">
+        <button class="conflict-btn keep" onclick={() => (statusNotice = null)}>
+          닫기
+        </button>
+      </div>
+    </div>
+  {/if}
 
   {#if activeTab.conflictContent != null}
     <div class="conflict-banner">
@@ -1487,7 +1759,7 @@
     </div>
 
     <div class="status-right">
-      <span>{activeTab.title}</span>
+      <span>{activeTab.title}{activeTab.readonly ? ' [RO]' : ''}</span>
       <span>•</span>
       <span>{activeTab.viewMode === 'rendered' ? msg.renderedView : msg.codeView}</span>
     </div>

@@ -77,7 +77,13 @@
 - [x] **외부 파일 변경 감지 (File Watcher)**:
   - [x] 1.5초 주기 및 창 포커스(`focus`) 시 열린 파일의 `mtime` 변경 확인
   - [x] 외부 에디터/AI가 디스크 파일을 수정했을 때 `dirty === false`면 자동 리로드, `dirty === true`면 상단 충돌 알림 배너(디스크 내용으로 다시 불러오기 / 내 변경사항 유지) 표시
-- [x] **CLI 실행 인자로 파일 열기**: `mdvim <파일경로>` 실행 시 해당 파일들을 초기 탭으로 자동 로드
+- [x] **CLI 실행 인자, Vim 옵션 및 표준 입출력(`stdin`/`stdout`) 완벽 지원** ([CLI_DESIGN.md](file:///home/gim/projects/mdvim/docs/CLI_DESIGN.md), [cli.rs](file:///home/gim/projects/mdvim/src-tauri/src/cli.rs)):
+  - [x] `mdvim ~/docs/test.md`, 상대 경로, 다중 파일, 새 파일 생성 경로, `<파일>:<줄>[:<열>]` 파싱
+  - [x] 실행 중인 창이 있을 때 IPC(`open-files`)로 기존 창에 새 탭 추가 및 창 포커스, 미실행 시 백그라운드 Detach 실행 (`--new-window`로 새 창 분리 가능)
+  - [x] Vim 옵션: `+{줄번호}`, `+`(마지막 줄), `+/{패턴}`, `-c <Ex명령>`, `-R`/`--readonly`(읽기 전용), `-n`, `--code`/`--rendered`
+  - [x] `-w`/`--wait`/`-f` 대기 모드 (`git commit` 등 `$EDITOR` 호환, `:cq` 시 비정상 종료 코드 `1` 반환)
+  - [x] 표준 입력(`-` 및 파이프 `stdin`) 버퍼 로드 및 표준 출력(`--stdout` 및 파이프/리다이렉션 `stdout`) 출력 지원
+  - [x] `mdvim ctl` 네이티브 바이너리 내장 및 `--install-path` / `cli.installPath` PATH 심볼릭 링크 자동 등록
 - [x] **최근 파일 목록 (Recent Files)**: `~/.config/mdvim/recent.json`에 최근 열거나 저장한 파일(최대 15개)을 자동 기록하고 커맨드 팔레트(`recent.open.*`)에서 즉시 검색·열기 지원
 - [x] **커서 이동에 따른 뷰포트 자동 스크롤 (Cursor Follow Viewport Scroll)** ([SPEC.md §6.1](file:///home/gim/projects/mdvim/docs/SPEC.md#L152-L162), [scroll/index.ts](file:///home/gim/projects/mdvim/src/lib/scroll/index.ts)):
   - [x] 커서 DOM 요소(`.cursor-block`, `.cursor-bar`, 또는 `.line.active-line`) 좌표 기반 상·하단 경계 이탈 시 자동 스크롤 및 여유 마진(`28px`) 적용
@@ -132,6 +138,7 @@
 
 | 날짜 | 주요 변경 내용 | 관련 커밋 |
 |---|---|---|
+| 2026-11-12 | CLI 실행 환경 지원(`mdvim ~/docs/test.md`, `+line`, `+/pattern`, `-R`, `--wait`, `--code`, `stdin`/`stdout` 파이프라인, `mdvim ctl` 네이티브 통합, PATH 심볼릭 링크 자동 설치) 구현 | - |
 | 2026-11-12 | 커서 이동 시 뷰포트 자동 스크롤(`scrollEditorCursorIntoView`) 및 탭 전환 시 커서/스크롤 위치 보존 구현 | - |
 | 2026-10-19 | 사용자 `config.toml` 단축키를 기본 단축키와 병합(`mergeShortcutRules`)하도록 수정 및 `Ctrl+L` 체크박스 토글 동작 개선 | `8d322ee` |
 | 2026-10-19 | 인라인 취소선(`~~text~~`) 투영/렌더링/단축키(`Ctrl+D`), 체크박스 토글 단축키(`Ctrl+L`), 최근 파일 목록(`recent.json`) 구현 | `de9b430` |

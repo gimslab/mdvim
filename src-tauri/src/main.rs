@@ -1,10 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cli;
+
+use cli::{CliFileEntry, CursorTarget, LaunchSpec, WaitResultPayload};
 use rmpv::{decode::read_value, encode::write_value, Value};
 use serde::Serialize;
-use std::io::{BufReader, Write};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{oneshot, Notify};
 
 struct NvimSession {
     _child: Child,
@@ -165,7 +172,7 @@ impl NvimSession {
             .args(["--embed", "--headless", "-n"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("Failed to spawn nvim: {e}"))?;
 
@@ -307,10 +314,16 @@ impl NvimSession {
         let mut cmdline = String::new();
         let mut cmdpos = 0usize;
         if mode == "c" {
-            if let Ok(val) = self.call("nvim_call_function", vec![Value::from("getcmdline"), Value::Array(vec![])]) {
+            if let Ok(val) = self.call(
+                "nvim_call_function",
+                vec![Value::from("getcmdline"), Value::Array(vec![])],
+            ) {
                 cmdline = val.as_str().unwrap_or("").to_string();
             }
-            if let Ok(val) = self.call("nvim_call_function", vec![Value::from("getcmdpos"), Value::Array(vec![])]) {
+            if let Ok(val) = self.call(
+                "nvim_call_function",
+                vec![Value::from("getcmdpos"), Value::Array(vec![])],
+            ) {
                 cmdpos = val.as_u64().unwrap_or(1) as usize;
             }
         }
@@ -512,7 +525,26 @@ async fn nvim_input(keys: String, state: tauri::State<'_, AppState>) -> Result<N
 }
 
 #[tauri::command]
-async fn nvim_paste_text(text: String, state: tauri::State<'_, AppState>) -> Result<NvimState, String> {
+async fn nvim_exec_command(
+    command: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<NvimState, String> {
+    let mut s = state.0.lock().map_err(|e| e.to_string())?;
+    let trimmed = command.trim().trim_start_matches(':').trim();
+    if is_app_ex_command(trimmed) {
+        let mut st = s.get_state()?;
+        st.ex_command = Some(trimmed.to_string());
+        return Ok(st);
+    }
+    let _ = s.call("nvim_command", vec![Value::from(trimmed)]);
+    s.get_state()
+}
+
+#[tauri::command]
+async fn nvim_paste_text(
+    text: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<NvimState, String> {
     let mut s = state.0.lock().map_err(|e| e.to_string())?;
     // nvim_paste handles multi-line text cleanly across all modes without mangling newlines
     let _ = s.call(
@@ -604,23 +636,193 @@ async fn nvim_set_buffer(
     s.get_state()
 }
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use tokio::sync::oneshot;
-
 static NEXT_REQ_ID: AtomicU64 = AtomicU64::new(1);
 
 struct PendingRequests(Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>);
-struct LastReportedState(Mutex<serde_json::Value>);
+struct LastReportedState {
+    state: Mutex<serde_json::Value>,
+    ready: AtomicBool,
+    notify: Notify,
+}
+
+impl LastReportedState {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(serde_json::Value::Null),
+            ready: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+}
+
+struct InitialLaunchState {
+    entries: Mutex<Vec<CliFileEntry>>,
+    launch_cwd: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct WaitTabCompletion {
+    content: String,
+    aborted: bool,
+}
+
+struct WaitManagerInner {
+    slots: HashMap<String, (Option<oneshot::Sender<WaitTabCompletion>>, String)>,
+    init_tokens: Vec<String>,
+    init_results: HashMap<String, WaitTabCompletion>,
+    wait_out_path: Option<PathBuf>,
+    wait_out_written: bool,
+}
+
+struct WaitManager(Mutex<WaitManagerInner>);
+
+impl WaitManager {
+    fn new(wait_out_path: Option<PathBuf>) -> Self {
+        Self(Mutex::new(WaitManagerInner {
+            slots: HashMap::new(),
+            init_tokens: Vec::new(),
+            init_results: HashMap::new(),
+            wait_out_path,
+            wait_out_written: false,
+        }))
+    }
+
+    fn register_token(
+        &self,
+        token: String,
+        fallback_content: String,
+        is_init: bool,
+    ) -> oneshot::Receiver<WaitTabCompletion> {
+        let (tx, rx) = oneshot::channel();
+        if let Ok(mut inner) = self.0.lock() {
+            if is_init {
+                inner.init_tokens.push(token.clone());
+            }
+            inner
+                .slots
+                .insert(token, (Some(tx), fallback_content));
+        }
+        rx
+    }
+
+    fn complete_token(&self, token: &str, content: String, aborted: bool) {
+        if let Ok(mut inner) = self.0.lock() {
+            let completion = WaitTabCompletion {
+                content: content.clone(),
+                aborted,
+            };
+            if let Some((mut tx_opt, _)) = inner.slots.remove(token) {
+                if let Some(tx) = tx_opt.take() {
+                    let _ = tx.send(completion.clone());
+                }
+            }
+            if inner.init_tokens.iter().any(|t| t == token) {
+                inner.init_results.insert(token.to_string(), completion);
+                Self::maybe_write_init_wait_out(&mut inner);
+            }
+        }
+    }
+
+    fn flush_all(&self, reported: &LastReportedState, aborted: bool) {
+        let reported_val = reported
+            .state
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or(serde_json::Value::Null);
+
+        let mut live_by_token: HashMap<String, String> = HashMap::new();
+        if let Some(tabs) = reported_val.get("tabs").and_then(|t| t.as_array()) {
+            for t in tabs {
+                if let (Some(tok), Some(md)) = (
+                    t.get("waitToken").and_then(|v| v.as_str()),
+                    t.get("rawMarkdown").and_then(|v| v.as_str()),
+                ) {
+                    live_by_token.insert(tok.to_string(), md.to_string());
+                }
+            }
+        }
+        if let Some(active) = reported_val.get("activeTab") {
+            if let (Some(tok), Some(md)) = (
+                active.get("waitToken").and_then(|v| v.as_str()),
+                active.get("rawMarkdown").and_then(|v| v.as_str()),
+            ) {
+                live_by_token.insert(tok.to_string(), md.to_string());
+            }
+        }
+
+        if let Ok(mut inner) = self.0.lock() {
+            let remaining_keys: Vec<String> = inner.slots.keys().cloned().collect();
+            for key in remaining_keys {
+                if let Some((mut tx_opt, fallback)) = inner.slots.remove(&key) {
+                    let final_content = live_by_token.remove(&key).unwrap_or(fallback);
+                    let comp = WaitTabCompletion {
+                        content: final_content,
+                        aborted,
+                    };
+                    if let Some(tx) = tx_opt.take() {
+                        let _ = tx.send(comp.clone());
+                    }
+                    if inner.init_tokens.iter().any(|t| t == &key) {
+                        inner.init_results.insert(key, comp);
+                    }
+                }
+            }
+            Self::maybe_write_init_wait_out(&mut inner);
+        }
+    }
+
+    fn maybe_write_init_wait_out(inner: &mut WaitManagerInner) {
+        if inner.wait_out_written {
+            return;
+        }
+        let Some(ref out_path) = inner.wait_out_path else {
+            return;
+        };
+        if inner.init_tokens.is_empty() {
+            return;
+        }
+        if !inner
+            .init_tokens
+            .iter()
+            .all(|t| inner.init_results.contains_key(t))
+        {
+            return;
+        }
+
+        let mut aborted = false;
+        let mut contents = Vec::new();
+        for tok in &inner.init_tokens {
+            if let Some(res) = inner.init_results.get(tok) {
+                if res.aborted {
+                    aborted = true;
+                }
+                contents.push(res.content.clone());
+            }
+        }
+
+        let payload = WaitResultPayload { aborted, contents };
+        if let Ok(json) = serde_json::to_string(&payload) {
+            let tmp_path = out_path.with_extension("tmp");
+            if std::fs::write(&tmp_path, json).is_ok() {
+                let _ = std::fs::rename(&tmp_path, out_path);
+                inner.wait_out_written = true;
+            }
+        }
+    }
+}
 
 #[tauri::command]
 async fn ctl_report_state(
     state_json: serde_json::Value,
     reported: tauri::State<'_, Arc<LastReportedState>>,
 ) -> Result<(), String> {
-    let mut st = reported.0.lock().map_err(|e| e.to_string())?;
-    *st = state_json;
+    {
+        let mut st = reported.state.lock().map_err(|e| e.to_string())?;
+        *st = state_json;
+    }
+    if !reported.ready.swap(true, Ordering::SeqCst) {
+        reported.notify.notify_waiters();
+    }
     Ok(())
 }
 
@@ -635,6 +837,35 @@ async fn ctl_response(
         let _ = tx.send(result);
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn app_complete_wait_tab(
+    wait_token: String,
+    content: String,
+    aborted: bool,
+    wait_mgr: tauri::State<'_, Arc<WaitManager>>,
+) -> Result<(), String> {
+    wait_mgr.complete_token(&wait_token, content, aborted);
+    Ok(())
+}
+
+#[tauri::command]
+async fn app_exit(
+    code: i32,
+    aborted: Option<bool>,
+    app_handle: tauri::AppHandle,
+    wait_mgr: tauri::State<'_, Arc<WaitManager>>,
+    reported: tauri::State<'_, Arc<LastReportedState>>,
+) -> Result<(), String> {
+    wait_mgr.flush_all(&reported, aborted.unwrap_or(code != 0));
+    app_handle.exit(code);
+    Ok(())
+}
+
+#[tauri::command]
+async fn app_install_cli_path() -> Result<String, String> {
+    install_cli_symlink()
 }
 
 fn get_config_path() -> std::path::PathBuf {
@@ -670,7 +901,7 @@ async fn app_save_config(content: String) -> Result<String, String> {
         .map_err(|e| format!("Failed to write config file {:?}: {e}", path))
 }
 
-fn get_launch_dir() -> std::path::PathBuf {
+fn detect_default_launch_dir() -> std::path::PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     // When running via `npm run tauri dev`, Cargo runs inside `src-tauri/`,
     // so step up to the workspace root where the user invoked the command.
@@ -684,19 +915,8 @@ fn get_launch_dir() -> std::path::PathBuf {
     cwd
 }
 
-fn resolve_user_path(raw: &str) -> std::path::PathBuf {
-    let trimmed = raw.trim();
-    if let Some(rest) = trimmed.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return std::path::PathBuf::from(home).join(rest);
-        }
-    }
-    let p = std::path::PathBuf::from(trimmed);
-    if p.is_absolute() {
-        p
-    } else {
-        get_launch_dir().join(p)
-    }
+fn resolve_user_path_with_base(raw: &str, base_dir: &Path) -> std::path::PathBuf {
+    cli::resolve_path_from_cwd(raw, base_dir)
 }
 
 fn file_mtime_ms(path: &std::path::Path) -> u64 {
@@ -759,11 +979,18 @@ struct ReadFileResult {
 }
 
 #[tauri::command]
-async fn app_read_file(path: String) -> Result<ReadFileResult, String> {
-    let resolved = resolve_user_path(&path);
-    let content = std::fs::read_to_string(&resolved)
-        .map_err(|e| format!("Failed to read file {:?}: {e}", resolved))?;
-    let mtime_ms = file_mtime_ms(&resolved);
+async fn app_read_file(
+    path: String,
+    launch_state: tauri::State<'_, Arc<InitialLaunchState>>,
+) -> Result<ReadFileResult, String> {
+    let resolved = resolve_user_path_with_base(&path, &launch_state.launch_cwd);
+    let (content, mtime_ms) = if resolved.exists() {
+        let c = std::fs::read_to_string(&resolved)
+            .map_err(|e| format!("Failed to read file {:?}: {e}", resolved))?;
+        (c, file_mtime_ms(&resolved))
+    } else {
+        (String::new(), 0)
+    };
     let resolved_str = resolved.to_string_lossy().to_string();
     record_recent_file(&resolved_str);
     Ok(ReadFileResult {
@@ -777,8 +1004,9 @@ async fn app_read_file(path: String) -> Result<ReadFileResult, String> {
 async fn app_check_file_modified(
     path: String,
     known_mtime_ms: u64,
+    launch_state: tauri::State<'_, Arc<InitialLaunchState>>,
 ) -> Result<Option<ReadFileResult>, String> {
-    let resolved = resolve_user_path(&path);
+    let resolved = resolve_user_path_with_base(&path, &launch_state.launch_cwd);
     if !resolved.exists() {
         return Ok(None);
     }
@@ -796,38 +1024,25 @@ async fn app_check_file_modified(
 }
 
 #[tauri::command]
-async fn app_get_cli_files() -> Result<Vec<ReadFileResult>, String> {
-    let mut results = Vec::new();
-    for arg in std::env::args().skip(1) {
-        if arg.starts_with('-') {
-            continue;
+async fn app_get_cli_files(
+    launch_state: tauri::State<'_, Arc<InitialLaunchState>>,
+) -> Result<Vec<CliFileEntry>, String> {
+    let mut guard = launch_state.entries.lock().map_err(|e| e.to_string())?;
+    for entry in guard.iter() {
+        if let Some(ref p) = entry.path {
+            record_recent_file(p);
         }
-        let resolved = resolve_user_path(&arg);
-        if resolved.is_dir() {
-            continue;
-        }
-        let (content, mtime_ms) = if resolved.exists() {
-            (
-                std::fs::read_to_string(&resolved).unwrap_or_default(),
-                file_mtime_ms(&resolved),
-            )
-        } else {
-            (String::new(), 0)
-        };
-        let resolved_str = resolved.to_string_lossy().to_string();
-        record_recent_file(&resolved_str);
-        results.push(ReadFileResult {
-            path: resolved_str,
-            content,
-            mtime_ms,
-        });
     }
-    Ok(results)
+    Ok(std::mem::take(&mut *guard))
 }
 
 #[tauri::command]
-async fn app_write_file(path: String, content: String) -> Result<String, String> {
-    let resolved = resolve_user_path(&path);
+async fn app_write_file(
+    path: String,
+    content: String,
+    launch_state: tauri::State<'_, Arc<InitialLaunchState>>,
+) -> Result<String, String> {
+    let resolved = resolve_user_path_with_base(&path, &launch_state.launch_cwd);
     if let Some(parent) = resolved.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -893,9 +1108,12 @@ fn find_unique_untitled_path(
 }
 
 #[tauri::command]
-async fn app_next_untitled_name(reserved_names: Vec<String>) -> Result<String, String> {
-    let base_dir = get_launch_dir();
-    let target = find_unique_untitled_path(&base_dir, "untitled.md", &reserved_names);
+async fn app_next_untitled_name(
+    reserved_names: Vec<String>,
+    launch_state: tauri::State<'_, Arc<InitialLaunchState>>,
+) -> Result<String, String> {
+    let base_dir = &launch_state.launch_cwd;
+    let target = find_unique_untitled_path(base_dir, "untitled.md", &reserved_names);
     Ok(target
         .file_name()
         .and_then(|n| n.to_str())
@@ -904,9 +1122,13 @@ async fn app_next_untitled_name(reserved_names: Vec<String>) -> Result<String, S
 }
 
 #[tauri::command]
-async fn app_save_draft(name: String, content: String) -> Result<String, String> {
-    let base_dir = get_launch_dir();
-    let target = find_unique_untitled_path(&base_dir, &name, &[]);
+async fn app_save_draft(
+    name: String,
+    content: String,
+    launch_state: tauri::State<'_, Arc<InitialLaunchState>>,
+) -> Result<String, String> {
+    let base_dir = &launch_state.launch_cwd;
+    let target = find_unique_untitled_path(base_dir, &name, &[]);
     std::fs::write(&target, content)
         .map(|_| {
             let s = target.to_string_lossy().to_string();
@@ -932,11 +1154,29 @@ fn start_ipc_server(
     app_handle: tauri::AppHandle,
     reported_state: Arc<LastReportedState>,
     pending_requests: Arc<PendingRequests>,
-) {
-    let socket_path = get_ipc_socket_path();
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(&socket_path);
-    }
+    wait_manager: Arc<WaitManager>,
+) -> PathBuf {
+    let default_socket = get_ipc_socket_path();
+    #[cfg(unix)]
+    let socket_path = {
+        if default_socket.exists() {
+            if std::os::unix::net::UnixStream::connect(&default_socket).is_ok() {
+                // Primary instance is active (--new-window case); bind a secondary socket
+                let uid = unsafe { libc::getuid() };
+                let pid = std::process::id();
+                PathBuf::from(format!("/tmp/mdvim-{}-{}.sock", uid, pid))
+            } else {
+                let _ = std::fs::remove_file(&default_socket);
+                default_socket
+            }
+        } else {
+            default_socket
+        }
+    };
+    #[cfg(not(unix))]
+    let socket_path = default_socket;
+
+    let bound_socket = socket_path.clone();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -971,6 +1211,7 @@ fn start_ipc_server(
                 let app = app_handle.clone();
                 let rep = reported_state.clone();
                 let pend = pending_requests.clone();
+                let wmgr = wait_manager.clone();
 
                 tokio::spawn(async move {
                     let (reader, mut writer) = stream.into_split();
@@ -995,12 +1236,144 @@ fn start_ipc_server(
                         };
 
                         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                        if method == "ping" {
+                            let pong = serde_json::json!({ "status": "ok", "pong": true });
+                            let _ = writer.write_all(format!("{pong}\n").as_bytes()).await;
+                            continue;
+                        }
+
+                        // Wait until frontend has mounted and reported initial state
+                        if !rep.ready.load(Ordering::SeqCst) {
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_secs(10),
+                                rep.notify.notified(),
+                            )
+                            .await;
+                        }
+
                         let req_id = NEXT_REQ_ID.fetch_add(1, Ordering::SeqCst);
 
                         let response = match method {
+                            "focus-window" => {
+                                use tauri::Manager;
+                                if let Some(win) = app.get_webview_window("main") {
+                                    let _ = win.unminimize();
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                                serde_json::json!({ "status": "ok" })
+                            }
                             "get-state" => {
-                                let st = rep.0.lock().map(|g| g.clone()).unwrap_or(serde_json::Value::Null);
+                                let st = rep
+                                    .state
+                                    .lock()
+                                    .map(|g| g.clone())
+                                    .unwrap_or(serde_json::Value::Null);
                                 serde_json::json!({ "status": "ok", "state": st })
+                            }
+                            "open-files" => {
+                                use tauri::{Emitter, Manager};
+                                if let Some(win) = app.get_webview_window("main") {
+                                    let _ = win.unminimize();
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+
+                                let params = req
+                                    .get("params")
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Null);
+                                let wait = params
+                                    .get("wait")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
+                                let mut entries: Vec<CliFileEntry> = params
+                                    .get("entries")
+                                    .cloned()
+                                    .and_then(|v| serde_json::from_value(v).ok())
+                                    .unwrap_or_default();
+
+                                let mut wait_rxs = Vec::new();
+                                if wait {
+                                    for (idx, entry) in entries.iter_mut().enumerate() {
+                                        let tok = format!("ipc-wait-{}-{}", req_id, idx);
+                                        entry.wait_token = Some(tok.clone());
+                                        let rx = wmgr.register_token(
+                                            tok,
+                                            entry.content.clone(),
+                                            false,
+                                        );
+                                        wait_rxs.push(rx);
+                                    }
+                                }
+
+                                for entry in &entries {
+                                    if let Some(ref p) = entry.path {
+                                        record_recent_file(p);
+                                    }
+                                }
+
+                                let (tx, rx) = oneshot::channel();
+                                if let Ok(mut map) = pend.0.lock() {
+                                    map.insert(req_id, tx);
+                                }
+                                let payload = serde_json::json!({
+                                    "id": req_id,
+                                    "method": "open-files",
+                                    "params": { "entries": entries }
+                                });
+
+                                if let Err(e) = app.emit("ctl-request", payload) {
+                                    if let Ok(mut map) = pend.0.lock() {
+                                        map.remove(&req_id);
+                                    }
+                                    serde_json::json!({
+                                        "status": "error",
+                                        "message": format!("Failed to dispatch open-files to frontend: {e}")
+                                    })
+                                } else {
+                                    let ack = tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        rx,
+                                    )
+                                    .await;
+                                    match ack {
+                                        Ok(Ok(_)) => {
+                                            if !wait {
+                                                serde_json::json!({ "status": "ok" })
+                                            } else {
+                                                let mut aborted = false;
+                                                let mut contents = Vec::new();
+                                                for wait_rx in wait_rxs {
+                                                    if let Ok(comp) = wait_rx.await {
+                                                        if comp.aborted {
+                                                            aborted = true;
+                                                        }
+                                                        contents.push(comp.content);
+                                                    }
+                                                }
+                                                serde_json::json!({
+                                                    "status": "ok",
+                                                    "aborted": aborted,
+                                                    "contents": contents
+                                                })
+                                            }
+                                        }
+                                        Ok(Err(_)) => serde_json::json!({
+                                            "status": "error",
+                                            "message": "Channel closed before open-files response"
+                                        }),
+                                        Err(_) => {
+                                            if let Ok(mut map) = pend.0.lock() {
+                                                map.remove(&req_id);
+                                            }
+                                            serde_json::json!({
+                                                "status": "error",
+                                                "message": "open-files timed out after 5s"
+                                            })
+                                        }
+                                    }
+                                }
                             }
                             "exec" | "list-commands" | "insert-text" | "send-keys" => {
                                 use tauri::Emitter;
@@ -1021,7 +1394,12 @@ fn start_ipc_server(
                                     }
                                     serde_json::json!({ "status": "error", "message": format!("Failed to dispatch to frontend: {e}") })
                                 } else {
-                                    match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        rx,
+                                    )
+                                    .await
+                                    {
                                         Ok(Ok(res)) => res,
                                         Ok(Err(_)) => serde_json::json!({ "status": "error", "message": "Channel closed before response" }),
                                         Err(_) => {
@@ -1047,22 +1425,476 @@ fn start_ipc_server(
             }
         });
     });
+
+    bound_socket
 }
 
 /// Opens an http(s)/mailto URL in the system default handler.
 #[tauri::command]
 fn app_open_url(url: String) -> Result<(), String> {
     let lower = url.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")) {
+    if !(lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:"))
+    {
         return Err("지원하지 않는 URL 스킴입니다 (http/https/mailto만 허용)".into());
     }
     #[cfg(target_os = "windows")]
-    let res = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn();
+    let res = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn();
     #[cfg(target_os = "macos")]
     let res = std::process::Command::new("open").arg(&url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let res = std::process::Command::new("xdg-open").arg(&url).spawn();
     res.map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(unix)]
+fn is_stdin_piped_or_redirected() -> bool {
+    unsafe {
+        if libc::isatty(libc::STDIN_FILENO) != 0 {
+            return false;
+        }
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fstat(libc::STDIN_FILENO, &mut st) != 0 {
+            return false;
+        }
+        let fmt = st.st_mode & libc::S_IFMT;
+        fmt == libc::S_IFIFO || fmt == libc::S_IFREG
+    }
+}
+
+#[cfg(not(unix))]
+fn is_stdin_piped_or_redirected() -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn is_stdout_piped_or_redirected() -> bool {
+    unsafe {
+        if libc::isatty(libc::STDOUT_FILENO) != 0 {
+            return false;
+        }
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fstat(libc::STDOUT_FILENO, &mut st) != 0 {
+            return false;
+        }
+        let fmt = st.st_mode & libc::S_IFMT;
+        fmt == libc::S_IFIFO || fmt == libc::S_IFREG
+    }
+}
+
+#[cfg(not(unix))]
+fn is_stdout_piped_or_redirected() -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn is_terminal_session() -> bool {
+    unsafe {
+        libc::isatty(libc::STDIN_FILENO) != 0
+            || libc::isatty(libc::STDOUT_FILENO) != 0
+            || libc::isatty(libc::STDERR_FILENO) != 0
+            || std::env::var_os("TERM").is_some()
+    }
+}
+
+#[cfg(not(unix))]
+fn is_terminal_session() -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn send_ipc_sync(method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    use std::os::unix::net::UnixStream;
+    let sock_path = get_ipc_socket_path();
+    let mut stream = UnixStream::connect(&sock_path).map_err(|e| {
+        format!(
+            "Cannot connect to mdvim at {:?}: {e}\nMake sure mdvim is running.",
+            sock_path
+        )
+    })?;
+    let payload = serde_json::json!({
+        "method": method,
+        "params": params
+    });
+    let line = format!("{payload}\n");
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|e| format!("Failed to write to IPC socket: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("Failed to flush IPC socket: {e}"))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut resp_line = String::new();
+    reader
+        .read_line(&mut resp_line)
+        .map_err(|e| format!("Failed to read IPC response: {e}"))?;
+    let trimmed = resp_line.trim();
+    if trimmed.is_empty() {
+        return Err("Empty response from mdvim IPC server".into());
+    }
+    serde_json::from_str(trimmed).map_err(|e| format!("Invalid JSON response from IPC: {e}"))
+}
+
+#[cfg(not(unix))]
+fn send_ipc_sync(_method: &str, _params: serde_json::Value) -> Result<serde_json::Value, String> {
+    Err("Unix domain socket IPC is only supported on Unix platforms".into())
+}
+
+fn build_entries_from_parsed(
+    parsed: &cli::ParsedCliArgs,
+    stdin_content: Option<String>,
+) -> Vec<CliFileEntry> {
+    let mut entries = Vec::new();
+    let (global_line, jump_last_line, search_pattern) = match &parsed.cursor_target {
+        Some(CursorTarget::Line(n)) => (Some(*n), false, None),
+        Some(CursorTarget::LastLine) => (None, true, None),
+        Some(CursorTarget::Pattern(p)) => (None, false, Some(p.clone())),
+        None => (None, false, None),
+    };
+
+    for f in &parsed.files {
+        if f.path.is_dir() {
+            continue;
+        }
+        let exists = f.path.exists();
+        let (content, mtime_ms) = if exists {
+            (
+                std::fs::read_to_string(&f.path).unwrap_or_default(),
+                file_mtime_ms(&f.path),
+            )
+        } else {
+            (String::new(), 0)
+        };
+        let path_str = f.path.to_string_lossy().to_string();
+        let title = f
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
+
+        entries.push(CliFileEntry {
+            path: Some(path_str),
+            title,
+            content,
+            mtime_ms,
+            exists,
+            is_stdin: false,
+            readonly: parsed.readonly,
+            view_mode: parsed.view_mode.clone(),
+            target_line: f.line.or(global_line),
+            target_col: f.col,
+            jump_last_line,
+            search_pattern: search_pattern.clone(),
+            commands: parsed.commands.clone(),
+            wait_token: None,
+        });
+    }
+
+    if let Some(stdin_str) = stdin_content {
+        entries.push(CliFileEntry {
+            path: None,
+            title: Some("[stdin]".to_string()),
+            content: stdin_str,
+            mtime_ms: 0,
+            exists: false,
+            is_stdin: true,
+            readonly: parsed.readonly,
+            view_mode: parsed.view_mode.clone(),
+            target_line: global_line,
+            target_col: None,
+            jump_last_line,
+            search_pattern,
+            commands: parsed.commands.clone(),
+            wait_token: None,
+        });
+    }
+
+    entries
+}
+
+fn run_ctl_cli(ctl_args: &[String], caller_cwd: &Path) -> i32 {
+    let sub = ctl_args.first().map(|s| s.as_str()).unwrap_or("help");
+    match sub {
+        "-h" | "--help" | "help" => {
+            cli::print_cli_help();
+            0
+        }
+        "ping" => match send_ipc_sync("ping", serde_json::Value::Null) {
+            Ok(res) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&res).unwrap_or_default()
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
+        },
+        "get-state" => match send_ipc_sync("get-state", serde_json::Value::Null) {
+            Ok(res) => {
+                let st = res.get("state").cloned().unwrap_or(serde_json::Value::Null);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&st).unwrap_or_default()
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
+        },
+        "list-commands" => match send_ipc_sync("list-commands", serde_json::Value::Null) {
+            Ok(res) => {
+                if res.get("status").and_then(|s| s.as_str()) == Some("ok") {
+                    let cmds = res
+                        .get("commands")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Array(vec![]));
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&cmds).unwrap_or_default()
+                    );
+                    0
+                } else {
+                    eprintln!(
+                        "Error: {}",
+                        res.get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Failed to list commands")
+                    );
+                    1
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
+        },
+        "exec" => {
+            let Some(cmd_id) = ctl_args.get(1) else {
+                eprintln!("Error: command-id required. Usage: mdvim ctl exec <command-id> [args-json]");
+                return 1;
+            };
+            let parsed_args = ctl_args.get(2).map(|raw| {
+                serde_json::from_str::<serde_json::Value>(raw)
+                    .unwrap_or_else(|_| serde_json::Value::String(raw.clone()))
+            });
+            let params = serde_json::json!({
+                "id": cmd_id,
+                "args": parsed_args
+            });
+            match send_ipc_sync("exec", params) {
+                Ok(res) => {
+                    if res.get("status").and_then(|s| s.as_str()) == Some("ok") {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&res).unwrap_or_default()
+                        );
+                        0
+                    } else {
+                        eprintln!(
+                            "Error executing {}: {}",
+                            cmd_id,
+                            res.get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Unknown error")
+                        );
+                        1
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
+        "send-keys" => {
+            let keys = ctl_args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+            if keys.is_empty() {
+                eprintln!("Error: keys required. Usage: mdvim ctl send-keys <keys>");
+                return 1;
+            }
+            match send_ipc_sync("send-keys", serde_json::json!({ "keys": keys })) {
+                Ok(res) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&res).unwrap_or_default()
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
+        "insert-text" => {
+            let raw = ctl_args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+            if raw.is_empty() {
+                eprintln!("Error: text required. Usage: mdvim ctl insert-text <text>");
+                return 1;
+            }
+            let text = raw
+                .replace("\\r\\n", "\n")
+                .replace("\\n", "\n")
+                .replace("\\t", "\t");
+            match send_ipc_sync("insert-text", serde_json::json!({ "text": text })) {
+                Ok(res) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&res).unwrap_or_default()
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
+        "open" => {
+            let sub_parsed = cli::parse_cli_args(&ctl_args[1..], caller_cwd);
+            let entries = build_entries_from_parsed(&sub_parsed, None);
+            if entries.is_empty() {
+                eprintln!("Error: file path required. Usage: mdvim ctl open <file...>");
+                return 1;
+            }
+            match send_ipc_sync(
+                "open-files",
+                serde_json::json!({ "entries": entries, "wait": sub_parsed.wait }),
+            ) {
+                Ok(res) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&res).unwrap_or_default()
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    1
+                }
+            }
+        }
+        "install-path" => match install_cli_symlink() {
+            Ok(msg) => {
+                println!("{msg}");
+                0
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                1
+            }
+        },
+        other => {
+            eprintln!("Unknown ctl subcommand: {other}");
+            cli::print_cli_help();
+            1
+        }
+    }
+}
+
+fn install_cli_symlink() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("Failed to locate executable: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+
+        #[cfg(target_os = "macos")]
+        {
+            if Path::new("/opt/homebrew/bin").is_dir() {
+                candidates.push(PathBuf::from("/opt/homebrew/bin/mdvim"));
+            }
+            candidates.push(PathBuf::from("/usr/local/bin/mdvim"));
+            if let Some(home) = std::env::var_os("HOME") {
+                candidates.push(PathBuf::from(home).join(".local/bin/mdvim"));
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            if let Some(home) = std::env::var_os("HOME") {
+                candidates.push(PathBuf::from(home).join(".local/bin/mdvim"));
+            }
+            candidates.push(PathBuf::from("/usr/local/bin/mdvim"));
+        }
+
+        let mut last_err = String::new();
+        for link_path in candidates {
+            if link_path == exe {
+                return Ok(format!(
+                    "'mdvim' binary is already installed directly at {:?}",
+                    exe
+                ));
+            }
+            if let Some(parent) = link_path.parent() {
+                if !parent.exists() && std::fs::create_dir_all(parent).is_err() {
+                    continue;
+                }
+            }
+            if link_path.exists() || link_path.symlink_metadata().is_ok() {
+                let _ = std::fs::remove_file(&link_path);
+            }
+            match std::os::unix::fs::symlink(&exe, &link_path) {
+                Ok(()) => {
+                    let link_dir = link_path
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let path_env = std::env::var("PATH").unwrap_or_default();
+                    let in_path = path_env.split(':').any(|p| p == link_dir);
+                    if in_path {
+                        return Ok(format!(
+                            "Installed CLI symlink: {} -> {}",
+                            link_path.display(),
+                            exe.display()
+                        ));
+                    } else {
+                        return Ok(format!(
+                            "Installed CLI symlink: {} -> {}\nNote: Add `{}` to your PATH (e.g. `export PATH=\"{}:$PATH\"`).",
+                            link_path.display(),
+                            exe.display(),
+                            link_dir,
+                            link_dir
+                        ));
+                    }
+                }
+                Err(e) => {
+                    last_err = format!("{:?}: {e}", link_path);
+                }
+            }
+        }
+        Err(format!("Failed to create mdvim symlink ({last_err})"))
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(format!("Executable is located at {}", exe.display()))
+    }
+}
+
+fn print_stdout_contents(contents: &[String]) {
+    let mut out = std::io::stdout().lock();
+    for (idx, item) in contents.iter().enumerate() {
+        if idx > 0 && !contents[idx - 1].ends_with('\n') {
+            let _ = out.write_all(b"\n");
+        }
+        let _ = out.write_all(item.as_bytes());
+    }
+    if let Some(last) = contents.last() {
+        if !last.ends_with('\n') && !last.is_empty() {
+            let _ = out.write_all(b"\n");
+        }
+    }
+    let _ = out.flush();
 }
 
 fn main() {
@@ -1082,18 +1914,292 @@ fn main() {
                 std::env::set_var("PATH", prefix.join(":"));
             }
         } else {
-            std::env::set_var("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+            std::env::set_var(
+                "PATH",
+                "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            );
         }
     }
+
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let caller_cwd = detect_default_launch_dir();
+    let parsed = cli::parse_cli_args(&raw_args, &caller_cwd);
+
+    if parsed.help {
+        cli::print_cli_help();
+        std::process::exit(0);
+    }
+
+    if parsed.version {
+        println!("mdvim {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+
+    if parsed.install_path {
+        match install_cli_symlink() {
+            Ok(msg) => {
+                println!("{msg}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if let Some(ref ctl_args) = parsed.ctl_args {
+        let code = run_ctl_cli(ctl_args, &caller_cwd);
+        std::process::exit(code);
+    }
+
+    // Check if this process is the spawned GUI child process (`--_gui-launch <spec_path>`)
+    let launch_spec: LaunchSpec = if let Some(ref spec_path) = parsed.gui_launch_spec {
+        let spec = std::fs::read_to_string(spec_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<LaunchSpec>(&s).ok())
+            .unwrap_or_default();
+        let _ = std::fs::remove_file(spec_path);
+        spec
+    } else {
+        // We are in the primary CLI / launcher entry point
+        let auto_stdin =
+            !parsed.read_stdin && parsed.files.is_empty() && is_stdin_piped_or_redirected();
+        let mut stdin_content: Option<String> = None;
+        if parsed.read_stdin || auto_stdin {
+            let mut buf = String::new();
+            if std::io::stdin().read_to_string(&mut buf).is_ok()
+                && (parsed.read_stdin || !buf.is_empty())
+            {
+                stdin_content = Some(buf);
+            }
+        }
+
+        let has_stdin = stdin_content.is_some();
+        let should_output_stdout =
+            parsed.stdout_output || (has_stdin && is_stdout_piped_or_redirected());
+        let should_wait = parsed.wait || should_output_stdout;
+
+        let mut entries = build_entries_from_parsed(&parsed, stdin_content);
+
+        // If an existing mdvim instance is running (and `--new-window` was not requested),
+        // hand off the request over the IPC socket!
+        #[cfg(unix)]
+        if !parsed.new_window {
+            let sock_path = get_ipc_socket_path();
+            if sock_path.exists() && std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
+                if entries.is_empty() && !should_wait {
+                    let _ = send_ipc_sync("focus-window", serde_json::Value::Null);
+                    std::process::exit(0);
+                }
+
+                if entries.is_empty() && should_wait {
+                    // `mdvim --wait` with no file arguments: create a blank waited tab
+                    entries.push(CliFileEntry {
+                        path: None,
+                        title: None,
+                        content: String::new(),
+                        mtime_ms: 0,
+                        exists: false,
+                        is_stdin: has_stdin,
+                        readonly: parsed.readonly,
+                        view_mode: parsed.view_mode.clone(),
+                        target_line: None,
+                        target_col: None,
+                        jump_last_line: false,
+                        search_pattern: None,
+                        commands: parsed.commands.clone(),
+                        wait_token: None,
+                    });
+                }
+
+                match send_ipc_sync(
+                    "open-files",
+                    serde_json::json!({
+                        "entries": entries,
+                        "wait": should_wait
+                    }),
+                ) {
+                    Ok(res) => {
+                        let aborted = res
+                            .get("aborted")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if aborted {
+                            std::process::exit(1);
+                        }
+                        if should_output_stdout {
+                            if let Some(arr) = res.get("contents").and_then(|v| v.as_array()) {
+                                let texts: Vec<String> = arr
+                                    .iter()
+                                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                    .collect();
+                                print_stdout_contents(&texts);
+                            }
+                        }
+                        std::process::exit(0);
+                    }
+                    Err(_) => {
+                        let _ = std::fs::remove_file(&sock_path);
+                    }
+                }
+            } else if sock_path.exists() {
+                let _ = std::fs::remove_file(&sock_path);
+            }
+        }
+
+        // No running instance found (or `--new-window` requested).
+        // If invoked from a terminal (and not `cargo run` / `tauri dev`), spawn the GUI child with
+        // stdio redirected to /dev/null so GTK/WebKit logs don't pollute the terminal or stdout pipe.
+        let in_cargo_dev = std::env::var_os("CARGO").is_some();
+        if should_wait || (!in_cargo_dev && is_terminal_session()) {
+            if let Ok(exe) = std::env::current_exe() {
+                let pid = std::process::id();
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let spec_path =
+                    std::env::temp_dir().join(format!("mdvim-launch-{}-{}.json", pid, ts));
+                let wait_out_path = if should_wait {
+                    Some(std::env::temp_dir().join(format!("mdvim-wait-{}-{}.json", pid, ts)))
+                } else {
+                    None
+                };
+
+                let spec = LaunchSpec {
+                    entries: entries.clone(),
+                    wait_out_path: wait_out_path.clone(),
+                    launch_cwd: Some(caller_cwd.clone()),
+                };
+
+                if let Ok(spec_json) = serde_json::to_string(&spec) {
+                    if std::fs::write(&spec_path, spec_json).is_ok() {
+                        let mut cmd = Command::new(exe);
+                        cmd.arg("--_gui-launch")
+                            .arg(&spec_path)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null());
+
+                        #[cfg(unix)]
+                        if !should_wait {
+                            use std::os::unix::process::CommandExt;
+                            unsafe {
+                                cmd.pre_exec(|| {
+                                    libc::setsid();
+                                    Ok(())
+                                });
+                            }
+                        }
+
+                        if let Ok(mut child) = cmd.spawn() {
+                            if let Some(wait_path) = wait_out_path {
+                                loop {
+                                    if wait_path.exists() {
+                                        break;
+                                    }
+                                    if let Ok(Some(_status)) = child.try_wait() {
+                                        break;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(30));
+                                }
+
+                                let payload = std::fs::read_to_string(&wait_path)
+                                    .ok()
+                                    .and_then(|s| serde_json::from_str::<WaitResultPayload>(&s).ok());
+                                let _ = std::fs::remove_file(&wait_path);
+
+                                if let Some(p) = payload {
+                                    if p.aborted {
+                                        std::process::exit(1);
+                                    }
+                                    if should_output_stdout {
+                                        print_stdout_contents(&p.contents);
+                                    }
+                                }
+                                std::process::exit(0);
+                            } else {
+                                // Wait briefly (up to 1500ms) for the child to bind the IPC socket
+                                // so back-to-back CLI commands (`mdvim a.md && mdvim b.md`) connect cleanly.
+                                let sock = get_ipc_socket_path();
+                                for _ in 0..50 {
+                                    #[cfg(unix)]
+                                    if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+                                        break;
+                                    }
+                                    #[cfg(not(unix))]
+                                    if sock.exists() {
+                                        break;
+                                    }
+                                    if let Ok(Some(_)) = child.try_wait() {
+                                        break;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(30));
+                                }
+                                std::process::exit(0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        LaunchSpec {
+            entries,
+            wait_out_path: None,
+            launch_cwd: Some(caller_cwd),
+        }
+    };
 
     let initial = vec![String::new()];
     let session = NvimSession::new(initial).expect("Failed to start embedded Neovim");
 
-    let reported_state = Arc::new(LastReportedState(Mutex::new(serde_json::Value::Null)));
+    let reported_state = Arc::new(LastReportedState::new());
     let pending_requests = Arc::new(PendingRequests(Mutex::new(HashMap::new())));
+    let wait_manager = Arc::new(WaitManager::new(launch_spec.wait_out_path.clone()));
+
+    let mut init_entries = launch_spec.entries;
+    if launch_spec.wait_out_path.is_some() {
+        if init_entries.is_empty() {
+            init_entries.push(CliFileEntry {
+                path: None,
+                title: None,
+                content: String::new(),
+                mtime_ms: 0,
+                exists: false,
+                is_stdin: false,
+                readonly: false,
+                view_mode: None,
+                target_line: None,
+                target_col: None,
+                jump_last_line: false,
+                search_pattern: None,
+                commands: Vec::new(),
+                wait_token: None,
+            });
+        }
+        for (idx, entry) in init_entries.iter_mut().enumerate() {
+            let tok = format!("init-wait-{}", idx);
+            entry.wait_token = Some(tok.clone());
+            let _ = wait_manager.register_token(tok, entry.content.clone(), true);
+        }
+    }
+
+    let launch_cwd = launch_spec
+        .launch_cwd
+        .unwrap_or_else(detect_default_launch_dir);
+    let initial_launch_state = Arc::new(InitialLaunchState {
+        entries: Mutex::new(init_entries),
+        launch_cwd,
+    });
 
     let rep_for_setup = reported_state.clone();
     let pend_for_setup = pending_requests.clone();
+    let wmgr_for_setup = wait_manager.clone();
+
+    let rep_for_win = reported_state.clone();
+    let wmgr_for_win = wait_manager.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1101,14 +2207,20 @@ fn main() {
         .manage(AppState(Mutex::new(session)))
         .manage(reported_state.clone())
         .manage(pending_requests.clone())
+        .manage(wait_manager.clone())
+        .manage(initial_launch_state)
         .invoke_handler(tauri::generate_handler![
             nvim_get_state,
             nvim_input,
+            nvim_exec_command,
             nvim_paste_text,
             nvim_set_register,
             nvim_set_buffer,
             ctl_report_state,
             ctl_response,
+            app_complete_wait_tab,
+            app_exit,
+            app_install_cli_path,
             app_load_config,
             app_save_config,
             app_read_file,
@@ -1121,8 +2233,21 @@ fn main() {
             app_open_url
         ])
         .setup(move |app| {
-            start_ipc_server(app.handle().clone(), rep_for_setup, pend_for_setup);
+            let _bound_socket = start_ipc_server(
+                app.handle().clone(),
+                rep_for_setup,
+                pend_for_setup,
+                wmgr_for_setup,
+            );
             Ok(())
+        })
+        .on_window_event(move |_window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            ) {
+                wmgr_for_win.flush_all(&rep_for_win, false);
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running mdvim");

@@ -61,6 +61,9 @@ ditto "$BUNDLE_PATH" "$DEST_APP"
 
 echo "==> Successfully deployed to ${DEST_APP}"
 
+echo "==> Registering 'mdvim' CLI symlink in PATH..."
+"${DEST_APP}/Contents/MacOS/mdvim" --install-path || true
+
 if [[ "$OPEN_AFTER" == true ]]; then
   echo "==> Launching ${APP_NAME}..."
   open "$DEST_APP"

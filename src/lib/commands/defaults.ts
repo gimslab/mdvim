@@ -18,6 +18,7 @@ export function createDefaultRegistry(actions: {
   openFile?: () => void | Promise<void>;
   saveFile?: () => void | Promise<void>;
   saveFileAs?: () => void | Promise<void>;
+  installCliPath?: () => void | Promise<void>;
 }): CommandRegistry {
   const registry = new CommandRegistry();
 
@@ -169,6 +170,16 @@ export function createDefaultRegistry(actions: {
       category: 'Editor',
       defaultShortcut: 'Ctrl+Shift+S',
       action: () => actions.saveFileAs!(),
+    });
+  }
+
+  if (actions.installCliPath) {
+    commands.push({
+      id: 'cli.installPath',
+      titleKo: "CLI: PATH에 'mdvim' 명령어 설치 (심볼릭 링크)",
+      titleEn: "CLI: Install 'mdvim' Command in PATH",
+      category: 'Editor',
+      action: () => actions.installCliPath!(),
     });
   }
 

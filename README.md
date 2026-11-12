@@ -261,27 +261,59 @@ macOS에서는 `.app` 번들 또는 `.dmg` 이미지를 생성할 수 있습니�
 
 ---
 
-## 외부 AI 및 CLI 연동 (`mdvim-ctl`)
+## 외부 AI 및 CLI 연동 (`mdvim` & `mdvim ctl`)
 
+`mdvim`은 단일 네이티브 바이너리로 CLI 파일 열기, Vim 옵션, 표준 입출력(`stdin`/`stdout`) 파이프라인, 그리고 AI 제어(`mdvim ctl`)를 모두 지원합니다.
+- **PATH 명령어 등록**:
+  - Ubuntu `.deb` 패키지 설치 시 `/usr/bin/mdvim`에 자동 설치됩니다.
+  - 로컬 빌드 배포 스크립트([scripts/deploy-mac.sh](file:///home/gim/projects/mdvim/scripts/deploy-mac.sh), [scripts/deploy-linux.sh](file:///home/gim/projects/mdvim/scripts/deploy-linux.sh)), `mdvim --install-path` 명령, 또는 앱 내 커맨드 팔레트(`CLI: PATH에 'mdvim' 명령어 설치`)로 심볼릭 링크를 자동 등록할 수 있습니다.
+
+### 1. CLI 파일 열기 및 Vim 옵션
+```bash
+# 특정 파일 열기 (이미 실행 중인 mdvim 창이 있으면 새 탭으로 즉시 추가)
+mdvim ~/docs/test.md
+mdvim ./a.md ./b.md
+
+# 특정 줄 번호, 마지막 줄, 검색 패턴 위치로 바로 이동하여 열기
+mdvim +42 ~/docs/test.md
+mdvim ~/docs/test.md:42:5
+mdvim + ~/docs/test.md
+mdvim +/TODO ~/docs/test.md
+
+# 읽기 전용(-R), 초기 뷰 모드(--code / --rendered), 시작 Ex 명령(-c)
+mdvim -R --code ~/docs/spec.md
+mdvim -c "normal! zz" ~/docs/test.md
+
+# 탭/창이 닫힐 때까지 터미널 대기 (git commit 등의 기본 $EDITOR로 사용 시)
+export EDITOR="mdvim --wait"
+mdvim -w COMMIT_EDITMSG
+
+# 표준 입력(stdin) 및 표준 출력(stdout) 파이프라인 연동
+cat draft.md | mdvim -
+cat draft.md | mdvim - > edited.md
+mdvim --stdout ~/docs/test.md | pbcopy
+```
+
+### 2. 외부 AI 및 자동화 제어 (`mdvim ctl`)
 `mdvim`은 실행 중 로컬 IPC 소켓을 오픈하여 외부 에이전트나 터미널 스크립트와 통신할 수 있습니다.
 - **Linux / macOS 소켓**: `/tmp/mdvim-<UID>.sock`
 - **Windows 소켓**: `%TEMP%\mdvim.sock`
 
 ```bash
 # 에디터 상태 확인 (활성 탭, 커서 위치, 문서 내용 등)
-node bin/mdvim-ctl.js get-state
+mdvim ctl get-state
 
 # 명령어 목록 조회
-node bin/mdvim-ctl.js list-commands
+mdvim ctl list-commands
 
 # 명령어 실행 (예: 뷰 토글)
-node bin/mdvim-ctl.js exec view.toggleMode
+mdvim ctl exec view.toggleMode
 
 # Neovim 키 시퀀스 전송
-node bin/mdvim-ctl.js send-keys "yy p"
+mdvim ctl send-keys "yy p"
 
 # 커서 위치에 마크다운 텍스트 직접 삽입
-node bin/mdvim-ctl.js insert-text "## 자동 생성된 헤딩\n"
+mdvim ctl insert-text "## 자동 생성된 헤딩\n"
 ```
 
 > AI 에이전트(Claude Code, Antigravity, Gemini CLI 등)와의 상세 연동 사양은 [SKILL.md](file:///home/gim/projects/mdvim/SKILL.md)를 참고하세요.
