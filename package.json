@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "check": "tsc --noEmit",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "deploy:mac": "bash scripts/deploy-mac.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.5.0",
