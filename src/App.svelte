@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { open, save } from '@tauri-apps/plugin-dialog';
@@ -27,6 +27,7 @@
     type ProjectedLine,
     type StyledChar,
   } from './lib/projection';
+  import { scrollEditorCursorIntoView } from './lib/scroll';
   import { createDefaultRegistry } from './lib/commands/defaults';
   import type { CommandDefinition, CommandContext } from './lib/commands';
   import CommandPalette from './components/CommandPalette.svelte';
@@ -65,6 +66,9 @@
     lastMtimeMs?: number;
     diskContent?: string;
     conflictContent?: string | null;
+    cursorRow?: number;
+    cursorCol?: number;
+    scrollTop?: number;
   }
 
   interface RenderSegment {
@@ -116,6 +120,24 @@
   let isComposing = $state(false);
   let preeditText = $state('');
   let imeInputEl: HTMLTextAreaElement | undefined = $state();
+  let editorPaneEl: HTMLElement | undefined = $state();
+
+  function scrollCursorIntoView() {
+    scrollEditorCursorIntoView(editorPaneEl, nvimState.cursor_row, nvimState.lines.length);
+    if (activeTab && editorPaneEl) {
+      activeTab.scrollTop = editorPaneEl.scrollTop;
+    }
+  }
+
+  function saveCurrentTabViewportState() {
+    const currentTab = tabs[activeTabIndex];
+    if (!currentTab) return;
+    currentTab.cursorRow = nvimState.cursor_row;
+    currentTab.cursorCol = nvimState.cursor_col_char;
+    if (editorPaneEl) {
+      currentTab.scrollTop = editorPaneEl.scrollTop;
+    }
+  }
 
   let rpcQueue = Promise.resolve();
   function enqueueRpc(fn: () => Promise<void>) {
@@ -176,7 +198,7 @@
     return segments;
   }
 
-  async function loadTabIntoNvim(tab: TabDoc, row = 0, col = 0) {
+  async function loadTabIntoNvim(tab: TabDoc, row = 0, col = 0, restoreScrollTop?: number) {
     const targetLines =
       tab.viewMode === 'rendered'
         ? projectLines(tab.mdModel)
@@ -187,6 +209,13 @@
       cursorColChar: col,
     });
     nvimState = st;
+    tab.cursorRow = st.cursor_row;
+    tab.cursorCol = st.cursor_col_char;
+    await tick();
+    if (editorPaneEl && restoreScrollTop !== undefined) {
+      editorPaneEl.scrollTop = restoreScrollTop;
+    }
+    scrollCursorIntoView();
     imeInputEl?.focus();
   }
 
@@ -247,6 +276,10 @@
     }
 
     nvimState = state;
+    tab.cursorRow = state.cursor_row;
+    tab.cursorCol = state.cursor_col_char;
+    await tick();
+    scrollCursorIntoView();
 
     if (state.ex_command) {
       await executeExCommand(state.ex_command);
@@ -380,6 +413,10 @@
         cursorRow: rowIdx,
         cursorColChar: newCol,
       });
+      tab.cursorRow = nvimState.cursor_row;
+      tab.cursorCol = nvimState.cursor_col_char;
+      await tick();
+      scrollCursorIntoView();
       imeInputEl?.focus();
     });
   }
@@ -474,6 +511,7 @@
   }
 
   async function addNewTab() {
+    saveCurrentTabViewportState();
     const idx = tabs.length + 1;
     const nextTitle = await getNextUntitledName();
     tabs.push({
@@ -483,19 +521,24 @@
       viewMode: 'rendered',
       mdModel: parseMarkdown(`# 새 문서 ${idx}\n\n내용을 입력하세요.`),
       dirty: false,
+      cursorRow: 0,
+      cursorCol: 0,
+      scrollTop: 0,
     });
     activeTabIndex = tabs.length - 1;
-    await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
+    await loadTabIntoNvim(tabs[activeTabIndex], 0, 0, 0);
   }
 
   async function selectTab(idx: number) {
     if (idx < 0 || idx >= tabs.length || idx === activeTabIndex) return;
+    saveCurrentTabViewportState();
     const currentTab = tabs[activeTabIndex];
     if (currentTab?.dirty) {
       await autoSaveTab(currentTab);
     }
     activeTabIndex = idx;
-    await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
+    const next = tabs[activeTabIndex];
+    await loadTabIntoNvim(next, next.cursorRow ?? 0, next.cursorCol ?? 0, next.scrollTop ?? 0);
   }
 
   async function nextTab() {
@@ -527,12 +570,16 @@
       tabs[0].path = null;
       tabs[0].mdModel = parseMarkdown('');
       tabs[0].dirty = false;
-      await loadTabIntoNvim(tabs[0], 0, 0);
+      tabs[0].cursorRow = 0;
+      tabs[0].cursorCol = 0;
+      tabs[0].scrollTop = 0;
+      await loadTabIntoNvim(tabs[0], 0, 0, 0);
       return;
     }
     tabs.splice(activeTabIndex, 1);
     activeTabIndex = Math.min(activeTabIndex, tabs.length - 1);
-    await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
+    const active = tabs[activeTabIndex];
+    await loadTabIntoNvim(active, active.cursorRow ?? 0, active.cursorCol ?? 0, active.scrollTop ?? 0);
   }
 
   async function executeExCommand(rawCmd: string) {
@@ -664,11 +711,12 @@
       if (isCleanUntitled) {
         tabs[activeTabIndex] = newDoc;
       } else {
+        saveCurrentTabViewportState();
         tabs.push(newDoc);
         activeTabIndex = tabs.length - 1;
       }
 
-      await loadTabIntoNvim(tabs[activeTabIndex], 0, 0);
+      await loadTabIntoNvim(tabs[activeTabIndex], 0, 0, 0);
       await refreshRecentFileCommands();
     } catch (err) {
       console.error('Failed to open file:', err);
@@ -1236,6 +1284,18 @@
     };
   });
 
+  // Keep cursor visible inside .editor-pane viewport whenever cursor/mode/view/composition changes
+  $effect(() => {
+    void nvimState.cursor_row;
+    void nvimState.cursor_col_char;
+    void nvimState.mode;
+    void nvimState.lines.length;
+    void activeTab.viewMode;
+    void isComposing;
+    void preeditText;
+    scrollCursorIntoView();
+  });
+
   // Continuously report current state to backend IPC cache
   $effect(() => {
     const st = {
@@ -1347,8 +1407,14 @@
   <div class="workspace {showInspector ? 'with-inspector' : ''}">
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <main
+      bind:this={editorPaneEl}
       class="editor-pane {activeTab.viewMode}"
       onmousedown={() => setTimeout(() => imeInputEl?.focus(), 0)}
+      onscroll={() => {
+        if (activeTab && editorPaneEl) {
+          activeTab.scrollTop = editorPaneEl.scrollTop;
+        }
+      }}
     >
       <textarea
         bind:this={imeInputEl}

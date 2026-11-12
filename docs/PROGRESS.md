@@ -79,6 +79,10 @@
   - [x] 외부 에디터/AI가 디스크 파일을 수정했을 때 `dirty === false`면 자동 리로드, `dirty === true`면 상단 충돌 알림 배너(디스크 내용으로 다시 불러오기 / 내 변경사항 유지) 표시
 - [x] **CLI 실행 인자로 파일 열기**: `mdvim <파일경로>` 실행 시 해당 파일들을 초기 탭으로 자동 로드
 - [x] **최근 파일 목록 (Recent Files)**: `~/.config/mdvim/recent.json`에 최근 열거나 저장한 파일(최대 15개)을 자동 기록하고 커맨드 팔레트(`recent.open.*`)에서 즉시 검색·열기 지원
+- [x] **커서 이동에 따른 뷰포트 자동 스크롤 (Cursor Follow Viewport Scroll)** ([SPEC.md §6.1](file:///home/gim/projects/mdvim/docs/SPEC.md#L152-L162), [scroll/index.ts](file:///home/gim/projects/mdvim/src/lib/scroll/index.ts)):
+  - [x] 커서 DOM 요소(`.cursor-block`, `.cursor-bar`, 또는 `.line.active-line`) 좌표 기반 상·하단 경계 이탈 시 자동 스크롤 및 여유 마진(`28px`) 적용
+  - [x] 마우스 휠 자유 스크롤 허용 및 키 입력/커서 이동 시 뷰포트 복귀
+  - [x] 탭 전환 시 탭별 마지막 커서 위치(`cursorRow`, `cursorCol`) 및 스크롤 위치(`scrollTop`) 보존·복원
 
 ---
 
@@ -128,6 +132,7 @@
 
 | 날짜 | 주요 변경 내용 | 관련 커밋 |
 |---|---|---|
+| 2026-11-12 | 커서 이동 시 뷰포트 자동 스크롤(`scrollEditorCursorIntoView`) 및 탭 전환 시 커서/스크롤 위치 보존 구현 | - |
 | 2026-10-19 | 사용자 `config.toml` 단축키를 기본 단축키와 병합(`mergeShortcutRules`)하도록 수정 및 `Ctrl+L` 체크박스 토글 동작 개선 | `8d322ee` |
 | 2026-10-19 | 인라인 취소선(`~~text~~`) 투영/렌더링/단축키(`Ctrl+D`), 체크박스 토글 단축키(`Ctrl+L`), 최근 파일 목록(`recent.json`) 구현 | `de9b430` |
 | 2026-10-19 | 외부 파일 변경 감지(File Watcher) 및 충돌 배너, CLI 파일 인자 로드, 렌더링 뷰 즉시 변환 및 목록 자동 완성 구현 | `c82aaf1` |
